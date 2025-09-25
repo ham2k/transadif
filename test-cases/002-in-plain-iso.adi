@@ -1,0 +1,18 @@
+Plain ISO-8859-1 file with no encoding specified.
+
+Command: `transadif {filename}`
+
+Expected output should be transcoded to Unicode.
+
+<PROGRAMID:9>TransADIF
+<eoh>
+<band:3>40m
+<call:5>K1ISO
+<freq:7>7.07582
+<mode:3>SSB
+<name:14>Juán Muñoz ISO
+<qso_date:8>20250901
+<time_on:4>0100
+<notes:33>002 Plain ISO-8859-1, no encoding
+<comment:33>002 Plain ISO-8859-1, no encoding
+<eor>

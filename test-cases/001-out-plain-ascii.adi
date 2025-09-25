@@ -1,0 +1,17 @@
+Plain ASCII file with no encoding specified.
+
+Command: `transadif {filename}`
+
+<PROGRAMID:9>TransADIF
+<ENCODING:5>UTF-8
+<eoh>
+<band:3>40m
+<call:5>K1ASC
+<freq:7>7.07582
+<mode:3>SSB
+<name:10>John ASCII
+<qso_date:8>20250901
+<time_on:4>0100
+<notes:28>001 Plain ASCII, no encoding
+<comment:28>001 Plain ASCII, no encoding
+<eor>
