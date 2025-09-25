@@ -3,7 +3,6 @@ Plain ASCII file with no encoding specified.
 Command: `transadif {filename}`
 
 <programid:9>TransADIF
-<encoding:5>UTF-8
 <eoh>
 <band:3>40m
 <call:5>K1ASC
@@ -12,6 +11,6 @@ Command: `transadif {filename}`
 <name:10>John ASCII
 <qso_date:8>20250901
 <time_on:4>0100
-<notes:28>001 Plain ASCII, no encoding
-<comment:28>001 Plain ASCII, no encoding
+<notes:24>Plain ASCII, no encoding
+<comment:24>Plain ASCII, no encoding
 <eor>

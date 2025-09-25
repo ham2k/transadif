@@ -6,14 +6,15 @@ Field counts are in bytes, but the data contains UTF-8 sequences.
 Expected output should reinterpret the field, not truncate it, and correctly export it as UTF
 
 <programid:9>TransADIF
+<encoding:5>UTF-8
 <eoh>
 <band:3>40m
 <call:5>K1UTF
 <freq:5>7.200
 <mode:3>SSB
-<name:18>Juán Muñoz UNDER
+<name:16>Juán Muñoz UNDER
 <qso_date:8>20250902
-<time_on:4>0000
-<notes:38>010 UTF with undercount if read as ISO
-<comment:38>010 UTF with undercount if read as ISO
+<time_on:4>0100
+<notes:35>UTF with undercount if read as ISO
+<comment:35>UTF with undercount if read as ISO
 <eor>

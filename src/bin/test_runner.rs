@@ -122,13 +122,13 @@ fn discover_test_cases_recursive(
         if path.is_dir() {
             discover_test_cases_recursive(&path, test_cases, filter)?;
         } else if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
-            if filename.contains("-in-") && filename.ends_with(".adi") {
+            if filename.ends_with("-in.adi") {
                 // This is an input file, look for corresponding output file
-                let output_filename = filename.replace("-in-", "-out-");
+                let output_filename = filename.replace("-in.adi", "-out.adi");
                 let output_path = path.parent().unwrap().join(output_filename);
 
                 if output_path.exists() {
-                    let test_name = filename.replace("-in-", "").replace(".adi", "");
+                    let test_name = filename.replace("-in.adi", "");
 
                     // Apply filter if specified
                     if let Some(filter_str) = filter {
@@ -139,8 +139,9 @@ fn discover_test_cases_recursive(
 
                     // Extract command line from input file
                     if let Ok(command_line) = extract_command_line(&path) {
+                        let parent_dir = path.parent().unwrap().file_name().unwrap_or_default().to_string_lossy();
                         test_cases.push(TestCase {
-                            name: format!("{}:{}", path.parent().unwrap().file_name().unwrap_or_default().to_string_lossy(), test_name),
+                            name: format!("{}:{}", parent_dir, test_name),
                             input_file: path.clone(),
                             expected_output_file: output_path,
                             command_line,

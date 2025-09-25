@@ -5,15 +5,14 @@ Command: `transadif {filename}`
 Expected output should be transcoded to Unicode.
 
 <programid:9>TransADIF
-<encoding:5>UTF-8
 <eoh>
 <band:3>40m
 <call:5>K1ISO
 <freq:5>7.200
 <mode:3>SSB
-<name:14>Ju√°n Mu√±oz ISO
+<name:14>Ju·n MuÒoz ISO
 <qso_date:8>20250901
 <time_on:4>0200
-<notes:33>002 Plain ISO-8859-1, no encoding
-<comment:33>002 Plain ISO-8859-1, no encoding
+<notes:29>Plain ISO-8859-1, no encoding
+<comment:29>Plain ISO-8859-1, no encoding
 <eor>

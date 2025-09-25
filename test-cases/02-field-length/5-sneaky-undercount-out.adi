@@ -1,0 +1,20 @@
+UTF-8 file with counts in characters and contents that can be confused with a the next field
+
+Command: `transadif {filename}`
+
+Field counts are in bytes, but the data contains UTF-8 sequences.
+Expected output should reinterpret the field, not truncate it, and correctly export it as UTF
+
+<programid:9>TransADIF
+<encoding:5>UTF-8
+<eoh>
+<band:3>40m
+<call:5>K1UTF
+<freq:5>7.200
+<mode:3>SSB
+<name:12>Juán Muñoz <
+<qso_date:8>20250902
+<time_on:4>0500
+<notes:43>UTF with undercount and field-like content
+<comment:43>UTF with undercount and field-like content
+<eor>

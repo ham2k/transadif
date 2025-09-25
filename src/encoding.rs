@@ -88,12 +88,12 @@ impl EncodingProcessor {
         let mut utf8_valid_count = 0;
         let mut utf8_invalid_count = 0;
         let mut high_bytes_count = 0;
-        let mut total_fields = 0;
+        let mut _total_fields = 0;
 
         // Check header fields
         if let Some(header) = &file.header {
             for field in &header.fields {
-                total_fields += 1;
+                _total_fields += 1;
                 let stats = self.analyze_field_bytes(&field.raw_data);
                 utf8_valid_count += stats.utf8_valid;
                 utf8_invalid_count += stats.utf8_invalid;
@@ -104,7 +104,7 @@ impl EncodingProcessor {
         // Check record fields
         for record in &file.records {
             for field in &record.fields {
-                total_fields += 1;
+                _total_fields += 1;
                 let stats = self.analyze_field_bytes(&field.raw_data);
                 utf8_valid_count += stats.utf8_valid;
                 utf8_invalid_count += stats.utf8_invalid;
@@ -181,19 +181,6 @@ impl EncodingProcessor {
         false
     }
 
-    fn get_utf8_sequence_length(&self, first_byte: u8) -> Option<usize> {
-        if first_byte & 0x80 == 0 {
-            Some(1) // ASCII
-        } else if first_byte & 0xE0 == 0xC0 {
-            Some(2) // 110xxxxx
-        } else if first_byte & 0xF0 == 0xE0 {
-            Some(3) // 1110xxxx
-        } else if first_byte & 0xF8 == 0xF0 {
-            Some(4) // 11110xxx
-        } else {
-            None // Invalid UTF-8 start byte
-        }
-    }
 
     fn process_field(&mut self, field: &mut AdifField, input_encoding: &str) -> Result<()> {
         // First, apply data corrections

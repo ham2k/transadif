@@ -1,0 +1,23 @@
+ISO-8859-1 file with large overcount if read as UTF-8
+
+Command: `transadif {filename}`
+
+Field counts are in bytes, but the data contains UTF-8 sequences.
+Expected output should change the field count for "name" to characters.
+
+By including a long Unicode name, we try to see if the parser truncates data.
+
+The name includes 31 unicode characters that corresponds to 78 bytes in UTF-8.
+
+<programid:9>TransADIF
+<eoh>
+<band:3>40m
+<call:5>K1ISO
+<freq:5>7.200
+<mode:3>SSB
+<name:31>이것은 로그 파일을 테스트하기 위한 아주 긴 글입니다 😜
+<qso_date:8>20250902
+<time_on:4>0400
+<notes:41>ISO with large overcount if read as UTF-8
+<comment:41>ISO with large overcount if read as UTF-8
+<eor>

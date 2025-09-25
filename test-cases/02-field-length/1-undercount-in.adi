@@ -1,0 +1,19 @@
+UTF-8 file with undercount (field with count less than characters until next field) if read as ISO-8859-1
+
+Command: `transadif {filename}`
+
+Field counts are in bytes, but the data contains UTF-8 sequences.
+Expected output should reinterpret the field, not truncate it, and correctly export it as UTF
+
+<programid:9>TransADIF
+<eoh>
+<band:3>40m
+<call:5>K1UTF
+<freq:5>7.200
+<mode:3>SSB
+<name:18>Juán Muñoz UNDER
+<qso_date:8>20250902
+<time_on:4>0100
+<notes:35>UTF with undercount if read as ISO
+<comment:35>UTF with undercount if read as ISO
+<eor>
