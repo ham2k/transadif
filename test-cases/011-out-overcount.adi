@@ -1,0 +1,22 @@
+ISO-8859-1 file with overcount (field with count greater than characters until next field) if read as UTF-8
+
+Command: `transadif {filename}`
+
+Field counts are in bytes, but the data contains UTF-8 sequences.
+Expected output should change the field count for "name" to characters and not read past the next field.
+
+By including three accented characters, we try to go past the CRLF in the `excessdata` for the "name" field.
+
+<programid:9>TransADIF
+<encoding:5>UTF-8
+<eoh>
+<band:3>40m
+<call:5>K1ISO
+<freq:5>7.200
+<mode:3>SSB
+<name:21>Juán Muñoz Marín OVER
+<qso_date:8>20250902
+<time_on:4>0100
+<notes:29>011 ISO-8859-1 with overcount
+<comment:29>011 ISO-8859-1 with overcount
+<eor>

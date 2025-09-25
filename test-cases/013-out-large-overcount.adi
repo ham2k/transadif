@@ -1,0 +1,25 @@
+ISO-8859-1 file with large overcount if read as UTF-8
+
+Command: `transadif {filename}`
+
+Field counts are in bytes, but the data contains UTF-8 sequences.
+Expected output should change the field count for "name" to characters.
+
+By including complex emoji, we try to go past the entire "<qso_date...>" field.
+
+Each 1️⃣ is 3 code points and 7 bytes in UTF-8. The 😜 emoji is 1 code point and 4 bytes in UTF-8.
+So field count is 16 Unicode characters but 39 bytes.
+
+<programid:9>TransADIF
+<encoding:5>UTF-8
+<eoh>
+<band:3>40m
+<call:5>K1ISO
+<freq:5>7.200
+<mode:3>SSB
+<name:16>1️⃣2️⃣3️⃣4️⃣5️⃣😜
+<qso_date:8>20250902
+<time_on:4>0300
+<notes:45>013 ISO with large overcount if read as UTF-8
+<comment:45>013 ISO with large overcount if read as UTF-8
+<eor>

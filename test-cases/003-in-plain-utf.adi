@@ -2,16 +2,15 @@ Plain UTF-8 file with no encoding specified.
 
 Command: `transadif {filename}`
 
-<PROGRAMID:9>TransADIF
-<ENCODING:5>UTF-8
+<programid:9>TransADIF
 <eoh>
 <band:3>40m
 <call:5>K1UTF
-<freq:7>7.07582
+<freq:5>7.200
 <mode:3>SSB
 <name:14>Juán Muñoz UTF
 <qso_date:8>20250901
-<time_on:4>0100
+<time_on:4>0300
 <notes:28>003 Plain UTF-8, no encoding
 <comment:28>003 Plain UTF-8, no encoding
 <eor>

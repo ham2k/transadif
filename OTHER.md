@@ -5,3 +5,6 @@ but that happen to coincide with UTF-8 extended sequences and should be interpre
 
 These misencodings can also be happen repeatedly, so "Ã©" gets interpreted as UTF-8 without correction, and then represented as ISO-88591-1 without transcoding, generating the sequence of bytes 0xC3 0x83 0xC2 0xA9, which in ISO-8859-1 corresponds to "ÃÂ©".
 
+# Resources
+
+https://unicode.org/emoji/charts/full-emoji-list.html

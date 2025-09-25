@@ -1,6 +1,6 @@
 # Prompt
 
-We want to create a command-line tool in Rust that can read ADIF files, properly interpret the data into Unicode strings regardless of the original encoding, and then generate a valid ADIF according to the goals and considerations described in the rest of this GOALS.md file.
+We want to create a command-line tool in Rust that can read ADIF files, properly interpret the data into Unicode strings regardless of the original encoding, and then generate a valid ADIF output file according to the goals and considerations described in the rest of this GOALS.md file.
 
 The project should include a mechanism to run the test cases provided and verify that the output is as expected.
 
@@ -73,17 +73,35 @@ It is possible that a field count is specified in the wrong units for the given,
 
 If the tool finds that `excessdata` for a field is anything other than whitespace characters, and `data` includes UTF-8 sequences, it is possible that the field count should be interpreted as bytes instead of characters, or viceversa. If running in `--strict` mode, it should report a warning and continue with the next field. If not running in `--strict` mode, it should reinterpret the field count, and if that produces a result with `excessdata` containing only whitespace, it should use updated information this instead, and continue parsing the rest of the file with the new type of count. If the reinterpretation still contains non-whitespace characters, it should report a warning and continue with the next field.
 
+### Implementation Details
+
+The tool should be written in Rust, and should use the clap crate for command line parsing.
+
+The tool should be written in a way that is easy to test, and should be able to run the test cases provided.
+
+The tool should be written in a way that is easy to distribute, and should be able to run on Linux, Windows, and macOS.
+
+The tool should read input files as raw bytes, before interpreting the encoding of each string `data` value and converting it to Unicode.
+
+The output ADIF file should calculate field counts based on the processed Unicode string values and the output encoding, and not the original field counts.
+
+Include any relevant entries in gitignore.
 
 # Test cases
 
-The test cases are in the `test-cases` directory.
+The test cases are in the `test-cases` directory, which can include subdirectories.
 
 They are named like `001-in-plain.adi`, `001-out-plain.adi`, `002-in-plain-iso.adi`, `002-out-plain-iso.adi`, `003-in-plain-utf.adi`, `003-out-plain-utf.adi`.
 
 The `in-` files are the input files, and the `out-` files are the expected output files.
 
-Each input file has in the `preamble` section a command line invocation that should produce the expected output file.
+Each input file has in the `preamble` section a command line invocation that should produce the expected output file. But it can ignore differences in the header preamble.
 
+These test files might include invalid UTF-8 sequences, so the testing tool should open them as raw bytes or plain ASCII text when trying to find the command line definition and other metadata.
+
+The comparison with the expected output file should be byte-by-byte, without using any encodings.
+
+The test running tool should accept a parameter to run only specific tests whose filenames or directories match a given string.
 
 # Usage
 
