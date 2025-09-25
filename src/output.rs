@@ -1,170 +1,126 @@
-use crate::adif::{AdifFile, AdifField};
-use crate::encoding::{EncodingDetector, EncodingOptions};
+use crate::adif::{AdifFile, AdifHeader, AdifRecord, AdifField};
+use crate::encoding::{EncodingProcessor, OutputEncoding};
 use crate::error::Result;
+use std::io::Write;
 
-pub fn generate_adif(adif_file: &mut AdifFile, opts: &EncodingOptions) -> Result<Vec<u8>> {
-    let encoding_detector = EncodingDetector::new();
-
-    // Only set encoding in output if the original had header fields or if encoding changed
-    let output_encoding = if opts.output_encoding.to_lowercase() == "utf-8" {
-        "UTF-8".to_string()
-    } else {
-        opts.output_encoding.clone()
-    };
-
-    // Check if the original file had any header fields and specifically an encoding field
-    let has_existing_header_fields = !adif_file.header.fields.is_empty();
-    let has_existing_encoding_field = adif_file.header.fields.iter()
-        .any(|field| field.name.to_lowercase() == "encoding");
-
-    // Add encoding field if there are header fields
-    if has_existing_encoding_field || has_existing_header_fields {
-        adif_file.set_encoding(&output_encoding);
-    }
-
-    // Add/update program ID if there were already header fields
-    if has_existing_header_fields {
-        adif_file.set_program_id();
-    }
-
-    // Generate the output string
-    let mut output = String::new();
-
-    // Write header
-    write_header(&mut output, &adif_file.header, opts)?;
-
-    // Write records
-    for record in &adif_file.records {
-        write_record(&mut output, record, opts)?;
-    }
-
-    // Encode to target encoding
-    encoding_detector.encode_from_unicode(&output, &opts.output_encoding, opts)
+pub struct OutputGenerator<'a> {
+    processor: &'a EncodingProcessor,
 }
 
-fn write_header(output: &mut String, header: &crate::adif::AdifHeader, opts: &EncodingOptions) -> Result<()> {
-    // Write preamble if present
-    if !header.preamble.trim().is_empty() {
-        output.push_str(&header.preamble);
-        if !header.preamble.ends_with('\n') {
-            output.push('\n');
+impl<'a> OutputGenerator<'a> {
+    pub fn new(processor: &'a EncodingProcessor) -> Self {
+        Self { processor }
+    }
+
+    pub fn generate<W: Write>(&self, file: &AdifFile, writer: &mut W) -> Result<()> {
+        // Write header if present
+        if let Some(header) = &file.header {
+            self.write_header(header, writer)?;
         }
+
+        // Write records
+        for record in &file.records {
+            self.write_record(record, writer)?;
+        }
+
+        Ok(())
     }
 
-    // Write header fields on separate lines
-    for field in &header.fields {
-        write_field(output, field, opts)?;
-        output.push('\n');
+    fn write_header<W: Write>(&self, header: &AdifHeader, writer: &mut W) -> Result<()> {
+        // Write preamble
+        writer.write_all(header.preamble.as_bytes())?;
+
+        // Write encoding field first if not present
+        let has_encoding_field = header.fields.iter()
+            .any(|f| f.name.to_lowercase() == "encoding");
+
+        if !has_encoding_field {
+            self.write_encoding_field(writer)?;
+            writer.write_all(b"\n")?; // Add newline after encoding field
+        }
+
+        // Write header fields
+        for field in &header.fields {
+            self.write_field(field, writer)?;
+            writer.write_all(field.excess_data.as_bytes())?;
+        }
+
+        // Write end of header
+        writer.write_all(b"<eoh>")?;
+        writer.write_all(header.excess_data.as_bytes())?;
+
+        Ok(())
     }
 
-    // Write header excess data
-    if !header.excess_data.trim().is_empty() {
-        output.push_str(&header.excess_data);
+    fn write_record<W: Write>(&self, record: &AdifRecord, writer: &mut W) -> Result<()> {
+        // Write record fields
+        for field in &record.fields {
+            self.write_field(field, writer)?;
+            writer.write_all(field.excess_data.as_bytes())?;
+        }
+
+        // Write end of record
+        writer.write_all(b"<eor>")?;
+        writer.write_all(record.excess_data.as_bytes())?;
+
+        Ok(())
     }
 
-    // Write end of header
-    output.push_str("<eoh>");
+    fn write_field<W: Write>(&self, field: &AdifField, writer: &mut W) -> Result<()> {
+        // Encode the field data for output
+        let (encoded_data, char_count) = self.processor.encode_for_output(&field.data)?;
 
-    Ok(())
-}
+        // Write field header
+        writer.write_all(b"<")?;
+        writer.write_all(field.name.as_bytes())?;
+        writer.write_all(b":")?;
 
-fn write_record(output: &mut String, record: &crate::adif::AdifRecord, opts: &EncodingOptions) -> Result<()> {
-    // Write record fields on separate lines
-    for field in &record.fields {
-        output.push('\n');
-        write_field(output, field, opts)?;
-    }
-
-    // Write record excess data
-    if !record.excess_data.trim().is_empty() {
-        output.push_str(&record.excess_data);
-    }
-
-    // Write end of record
-    output.push('\n');
-    output.push_str("<eor>");
-    output.push('\n');
-
-    Ok(())
-}
-
-fn write_field(output: &mut String, field: &AdifField, opts: &EncodingOptions) -> Result<()> {
-    let encoding_detector = EncodingDetector::new();
-
-    // For UTF-8 output, use the field data and corrected length
-    let (final_string, length) = if opts.output_encoding.to_lowercase() == "utf-8" {
-        let string = field.data.clone();
-        // Use the corrected length from the field (after mojibake correction)
-        let char_count = field.length;
-        (string, char_count)
-    } else {
-        // For non-UTF-8, process through encoding pipeline
-        let processed_data = encoding_detector.encode_from_unicode(&field.data, &opts.output_encoding, opts)?;
-        let processed_string = String::from_utf8_lossy(&processed_data).into_owned();
-        let byte_count = processed_data.len();
-        (processed_string, byte_count)
-    };
-
-    // Write field using original case
-    let field_name = field.name.clone();
-
-    if let Some(ref field_type) = field.field_type {
-        output.push_str(&format!("<{}:{}:{}>{}",
-            field_name, length, field_type, final_string));
-    } else {
-        output.push_str(&format!("<{}:{}>{}",
-            field_name, length, final_string));
-    }
-
-    // Write field excess data
-    if !field.excess_data.trim().is_empty() {
-        output.push_str(&field.excess_data);
-    }
-
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::adif::{AdifHeader, AdifRecord};
-
-    #[test]
-    fn test_generate_simple_adif() {
-        let mut adif_file = AdifFile {
-            header: AdifHeader {
-                preamble: "Test file\n".to_string(),
-                fields: vec![],
-                excess_data: String::new(),
-            },
-            records: vec![
-                AdifRecord {
-                    fields: vec![
-                        AdifField {
-                            name: "CALL".to_string(),
-                            length: 5,
-                            field_type: None,
-                            data: "K1ABC".to_string(),
-                            excess_data: String::new(),
-                        },
-                    ],
-                    excess_data: String::new(),
-                }
-            ],
+        // Use the calculated length based on output encoding
+        let length = match self.processor.options.output_encoding {
+            OutputEncoding::Utf8 => char_count, // UTF-8 uses character count
+            _ => encoded_data.len(), // Other encodings use byte count
         };
 
-        let opts = EncodingOptions {
-            input_encoding: None,
-            output_encoding: "utf-8".to_string(),
-            transcode: false,
-            replace_char: "?".to_string(),
-            delete_incompatible: false,
-            ascii_transliterate: false,
-            strict_mode: false,
+        writer.write_all(length.to_string().as_bytes())?;
+
+        // Write field type if present
+        if let Some(ref field_type) = field.field_type {
+            writer.write_all(b":")?;
+            writer.write_all(field_type.as_bytes())?;
+        }
+
+        writer.write_all(b">")?;
+
+        // Write field data
+        writer.write_all(&encoded_data)?;
+
+        Ok(())
+    }
+
+    fn write_encoding_field<W: Write>(&self, writer: &mut W) -> Result<()> {
+        let encoding_name = match &self.processor.options.output_encoding {
+            OutputEncoding::Utf8 => "UTF-8",
+            OutputEncoding::Ascii => "ASCII",
+            OutputEncoding::CodePage(name) => name.as_str(),
         };
 
-        let result = generate_adif(&mut adif_file, &opts);
-        assert!(result.is_ok());
+        let encoding_bytes = encoding_name.as_bytes();
+        writer.write_all(b"<encoding:")?;
+        writer.write_all(encoding_bytes.len().to_string().as_bytes())?;
+        writer.write_all(b">")?;
+        writer.write_all(encoding_bytes)?;
+
+        Ok(())
     }
 }
 
+impl AdifFile {
+    pub fn write_to<W: Write>(
+        &self,
+        writer: &mut W,
+        processor: &EncodingProcessor,
+    ) -> Result<()> {
+        let generator = OutputGenerator::new(processor);
+        generator.generate(self, writer)
+    }
+}

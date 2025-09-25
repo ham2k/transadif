@@ -1,18 +1,12 @@
-use crate::encoding::{EncodingDetector, EncodingOptions};
-use crate::error::{Result, TransAdifError};
-use encoding_rs::Encoding;
-use regex::Regex;
+use crate::error::{Result, TransadifError};
 
-#[derive(Debug, Clone)]
-pub struct AdifFile {
-    pub header: AdifHeader,
-    pub records: Vec<AdifRecord>,
-}
-
-#[derive(Debug, Clone)]
-pub struct AdifHeader {
-    pub preamble: String,
-    pub fields: Vec<AdifField>,
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdifField {
+    pub name: String,
+    pub length: usize,
+    pub field_type: Option<String>,
+    pub data: String,
+    pub raw_data: Vec<u8>,
     pub excess_data: String,
 }
 
@@ -23,430 +17,376 @@ pub struct AdifRecord {
 }
 
 #[derive(Debug, Clone)]
-pub struct AdifField {
-    pub name: String,
-    pub length: usize,
-    pub field_type: Option<String>,
-    pub data: String,
+pub struct AdifHeader {
+    pub preamble: String,
+    pub fields: Vec<AdifField>,
     pub excess_data: String,
 }
 
-pub struct AdifParser {
-    field_regex: Regex,
-    eoh_regex: Regex,
-    eor_regex: Regex,
-    encoding_detector: EncodingDetector,
+#[derive(Debug, Clone)]
+pub struct AdifFile {
+    pub header: Option<AdifHeader>,
+    pub records: Vec<AdifRecord>,
+    pub detected_encoding: Option<String>,
 }
 
-impl AdifParser {
-    pub fn new() -> Self {
-        Self {
-            field_regex: Regex::new(r"(?i)<([A-Za-z0-9_]+):(\d+)(?::([A-Za-z0-9_]+))?>").unwrap(),
-            eoh_regex: Regex::new(r"(?i)<eoh>").unwrap(),
-            eor_regex: Regex::new(r"(?i)<eor>").unwrap(),
-            encoding_detector: EncodingDetector::new(),
-        }
+impl AdifFile {
+    pub fn parse(data: &[u8]) -> Result<Self> {
+        let mut parser = AdifParser::new(data);
+        parser.parse()
     }
 
-    pub fn parse(&self, data: &[u8], opts: &EncodingOptions) -> Result<AdifFile> {
-        // Detect encoding
-        let encoding = self.encoding_detector.detect_encoding(data, opts.input_encoding.as_deref())?;
-
-        // Decode to Unicode
-        let text = self.encoding_detector.decode_to_unicode(data, encoding, opts.strict_mode)?;
-
-        // Parse structure with encoding context for field-level mojibake correction
-        let (header, remaining) = self.parse_header(&text)?;
-        let records = self.parse_records_with_encoding(&remaining, opts, encoding)?;
-
-        Ok(AdifFile { header, records })
-    }
-
-    fn parse_header<'a>(&self, text: &'a str) -> Result<(AdifHeader, &'a str)> {
-        // Check if file starts with '<' (no header)
-        if text.trim_start().starts_with('<') && !text.trim_start().to_lowercase().starts_with("<eoh>") {
-            return Ok((
-                AdifHeader {
-                    preamble: String::new(),
-                    fields: Vec::new(),
-                    excess_data: String::new(),
-                },
-                text,
-            ));
-        }
-
-        // Find end of header
-        if let Some(eoh_match) = self.eoh_regex.find(text) {
-            let header_text = &text[..eoh_match.start()];
-            let remaining = &text[eoh_match.end()..];
-
-            // Parse header content
-            let (preamble, header_fields, excess_data) = self.parse_header_content(header_text)?;
-
-            // Extract excess data after <eoh>
-            let (header_excess, record_start) = self.extract_excess_data(remaining);
-            let final_excess = if excess_data.is_empty() {
-                header_excess
-            } else if header_excess.is_empty() {
-                excess_data
-            } else {
-                format!("{}{}", excess_data, header_excess)
-            };
-
-            Ok((
-                AdifHeader {
-                    preamble,
-                    fields: header_fields,
-                    excess_data: final_excess,
-                },
-                record_start,
-            ))
-        } else {
-            // No <eoh> found, treat entire content as preamble
-            Ok((
-                AdifHeader {
-                    preamble: text.to_string(),
-                    fields: Vec::new(),
-                    excess_data: String::new(),
-                },
-                "",
-            ))
-        }
-    }
-
-    fn parse_header_content(&self, header_text: &str) -> Result<(String, Vec<AdifField>, String)> {
-        let mut preamble = String::new();
-        let mut fields: Vec<AdifField> = Vec::new();
-        let mut excess_data = String::new();
-        let mut current_pos = 0;
-        let mut found_first_field = false;
-
-        for field_match in self.field_regex.find_iter(header_text) {
-            if !found_first_field {
-                preamble = header_text[..field_match.start()].to_string();
-                found_first_field = true;
-            } else {
-                // Excess data between fields
-                if current_pos < field_match.start() {
-                    if let Some(last_field) = fields.last_mut() {
-                        last_field.excess_data = header_text[current_pos..field_match.start()].to_string();
-                    }
+    pub fn get_encoding_from_header(&self) -> Option<String> {
+        if let Some(header) = &self.header {
+            for field in &header.fields {
+                if field.name.to_lowercase() == "encoding" {
+                    return Some(field.data.clone());
                 }
             }
-
-            let field = self.parse_field_at_match_simple(header_text, &field_match)?;
-            current_pos = field_match.end() + field.data.len();
-            fields.push(field);
         }
+        None
+    }
+}
 
-        // Handle remaining text after last field
-        if current_pos < header_text.len() {
-            excess_data = header_text[current_pos..].to_string();
-        }
+struct AdifParser<'a> {
+    data: &'a [u8],
+    position: usize,
+}
 
-        // If no fields found, everything is preamble
-        if !found_first_field {
-            preamble = header_text.to_string();
-        }
-
-        Ok((preamble, fields, excess_data))
+impl<'a> AdifParser<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, position: 0 }
     }
 
-    fn parse_records_with_encoding(&self, text: &str, opts: &EncodingOptions, encoding: &'static Encoding) -> Result<Vec<AdifRecord>> {
+    fn parse(&mut self) -> Result<AdifFile> {
+        let header = self.parse_header()?;
         let mut records = Vec::new();
-        let mut remaining = text;
 
-        while !remaining.trim().is_empty() {
-            if let Some(eor_match) = self.eor_regex.find(remaining) {
-                let record_text = &remaining[..eor_match.start()];
-                let record = self.parse_single_record_with_encoding(record_text, opts, encoding)?;
+        while self.position < self.data.len() {
+            if let Some(record) = self.parse_record()? {
                 records.push(record);
-
-                // Extract excess data after <eor>
-                remaining = &remaining[eor_match.end()..];
-                let (excess, next_record) = self.extract_excess_data(remaining);
-                if !excess.is_empty() {
-                    if let Some(last_record) = records.last_mut() {
-                        last_record.excess_data = excess;
-                    }
-                }
-                remaining = next_record;
             } else {
-                // No more <eor> tags, parse remaining as incomplete record
-                if !remaining.trim().is_empty() {
-                    let record = self.parse_single_record_with_encoding(remaining, opts, encoding)?;
-                    records.push(record);
-                }
                 break;
             }
         }
 
-        Ok(records)
-    }
-
-    fn parse_single_record_with_encoding(&self, record_text: &str, opts: &EncodingOptions, encoding: &'static Encoding) -> Result<AdifRecord> {
-        let mut fields: Vec<AdifField> = Vec::new();
-        let mut current_pos = 0;
-
-        for field_match in self.field_regex.find_iter(record_text) {
-            // Handle excess data before this field
-            if current_pos < field_match.start() {
-                if let Some(last_field) = fields.last_mut() {
-                    last_field.excess_data = record_text[current_pos..field_match.start()].to_string();
-                }
-            }
-
-            let field = self.parse_field_at_match_with_encoding(record_text, &field_match, opts, encoding)?;
-            current_pos = field_match.end() + field.data.len();
-            fields.push(field);
-        }
-
-        // Handle remaining text after last field
-        let excess_data = if current_pos < record_text.len() {
-            record_text[current_pos..].to_string()
-        } else {
-            String::new()
-        };
-
-        Ok(AdifRecord { fields, excess_data })
-    }
-
-    fn parse_field_at_match_with_encoding(&self, text: &str, field_match: &regex::Match, opts: &EncodingOptions, encoding: &'static Encoding) -> Result<AdifField> {
-        let captures = self.field_regex.captures(&text[field_match.range()]).unwrap();
-
-        let name = captures.get(1).unwrap().as_str().to_string();
-        let length_str = captures.get(2).unwrap().as_str();
-        let length = length_str.parse::<usize>()
-            .map_err(|_| TransAdifError::InvalidField(format!("Invalid length: {}", length_str)))?;
-        let field_type = captures.get(3).map(|m| m.as_str().to_string());
-
-        // Extract field data - handle both byte and character counting
-        let data_start_byte = field_match.end();
-
-        // First try byte-based extraction (traditional ADIF)
-        let data_end_byte = data_start_byte + length;
-        let data = if data_end_byte <= text.len() {
-            // Check if the slice boundaries are on character boundaries
-            let candidate = if text.is_char_boundary(data_start_byte) && text.is_char_boundary(data_end_byte) {
-                text[data_start_byte..data_end_byte].to_string()
-            } else {
-                // If not on character boundaries, fall back to character-based extraction
-                let char_start = text[..data_start_byte].chars().count();
-                text.chars().skip(char_start).take(length).collect::<String>()
-            };
-
-            // Check if this extraction resulted in valid UTF-8 and reasonable length
-            // If the candidate is shorter in characters than expected,
-            // it might be that the length was specified in characters, not bytes
-            if candidate.chars().count() < length {
-                // Try character-based extraction instead
-                let char_start = text[..data_start_byte].chars().count();
-                let char_extracted: String = text.chars().skip(char_start).take(length).collect();
-                if !char_extracted.is_empty() {
-                    char_extracted
-                } else {
-                    candidate
-                }
-            } else {
-                candidate
-            }
-        } else {
-            // Byte-based extraction would go beyond string, try character-based
-            let char_start = text[..data_start_byte].chars().count();
-            let char_extracted: String = text.chars().skip(char_start).take(length).collect();
-            if char_extracted.is_empty() {
-                return Err(TransAdifError::Parse {
-                    pos: data_start_byte,
-                    msg: format!("Field {} claims length {} but insufficient data", name, length),
-                });
-            }
-            char_extracted
-        };
-
-        // Apply mojibake correction to field data if not in strict mode
-        let corrected_data = if !opts.strict_mode {
-            let mojibake_corrected = self.encoding_detector.correct_mojibake(&data, encoding)?;
-            // Clean up the field data by removing obvious excess content
-            let cleaned = self.clean_field_data(&mojibake_corrected, &name);
-            // Additional cleanup: trim trailing whitespace/newlines
-            cleaned.trim_end().to_string()
-        } else {
-            data.clone()
-        };
-
-        // Determine correct field length based on encoding and data
-        let corrected_length = self.determine_correct_field_length(&data, &corrected_data, length, encoding)?;
-
-
-        Ok(AdifField {
-            name,
-            length: corrected_length,
-            field_type,
-            data: corrected_data,
-            excess_data: String::new(),
+        Ok(AdifFile {
+            header,
+            records,
+            detected_encoding: None,
         })
     }
 
-    fn parse_field_at_match_simple(&self, text: &str, field_match: &regex::Match) -> Result<AdifField> {
-        let captures = self.field_regex.captures(&text[field_match.range()]).unwrap();
+    fn parse_header(&mut self) -> Result<Option<AdifHeader>> {
+        if self.position >= self.data.len() {
+            return Ok(None);
+        }
 
-        let name = captures.get(1).unwrap().as_str().to_string();
-        let length_str = captures.get(2).unwrap().as_str();
-        let length = length_str.parse::<usize>()
-            .map_err(|_| TransAdifError::InvalidField(format!("Invalid length: {}", length_str)))?;
-        let field_type = captures.get(3).map(|m| m.as_str().to_string());
+        // Check if file starts with '<' (no header)
+        if self.data[self.position] == b'<' {
+            return Ok(None);
+        }
 
-        // Extract field data - simple version for headers (no mojibake correction)
-        let data_start_byte = field_match.end();
-        let data_end_byte = data_start_byte + length;
-        let data = if data_end_byte <= text.len() {
-            text[data_start_byte..data_end_byte].to_string()
+        let mut preamble = String::new();
+        let mut fields = Vec::new();
+
+        // Find the end of header marker
+        while self.position < self.data.len() {
+            if self.check_for_eoh() {
+                // Parse any fields in the header
+                let header_data = &self.data[..self.position];
+                let mut field_parser = AdifParser::new(header_data);
+                field_parser.position = preamble.len();
+
+                while field_parser.position < header_data.len() {
+                    if field_parser.check_for_eoh() {
+                        break;
+                    }
+                    if let Some(field) = field_parser.parse_field()? {
+                        fields.push(field);
+                    } else {
+                        field_parser.position += 1;
+                    }
+                }
+
+                // Skip the <eoh> tag
+                self.skip_eoh();
+                let excess_data = self.consume_until_next_field();
+
+                return Ok(Some(AdifHeader {
+                    preamble,
+                    fields,
+                    excess_data,
+                }));
+            }
+
+            preamble.push(self.data[self.position] as char);
+            self.position += 1;
+        }
+
+        Ok(None)
+    }
+
+    fn parse_record(&mut self) -> Result<Option<AdifRecord>> {
+        if self.position >= self.data.len() {
+            return Ok(None);
+        }
+
+        let mut fields = Vec::new();
+
+        while self.position < self.data.len() {
+            if self.check_for_eor() {
+                self.skip_eor();
+                let excess_data = self.consume_until_next_field();
+                return Ok(Some(AdifRecord {
+                    fields,
+                    excess_data,
+                }));
+            }
+
+            if let Some(field) = self.parse_field()? {
+                fields.push(field);
+            } else {
+                self.position += 1;
+            }
+        }
+
+        if !fields.is_empty() {
+            Ok(Some(AdifRecord {
+                fields,
+                excess_data: String::new(),
+            }))
         } else {
-            return Err(TransAdifError::Parse {
-                pos: data_start_byte,
-                msg: format!("Field {} claims length {} but insufficient data", name, length),
-            });
-        };
+            Ok(None)
+        }
+    }
 
-        Ok(AdifField {
-            name,
-            length,
+    fn parse_field(&mut self) -> Result<Option<AdifField>> {
+        if self.position >= self.data.len() || self.data[self.position] != b'<' {
+            return Ok(None);
+        }
+
+        let start_pos = self.position;
+        self.position += 1; // Skip '<'
+
+        // Parse field name
+        let mut field_name = String::new();
+        while self.position < self.data.len() && self.data[self.position] != b':' {
+            let ch = self.data[self.position] as char;
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                field_name.push(ch);
+                self.position += 1;
+            } else {
+                // Invalid field name character, backtrack
+                self.position = start_pos;
+                return Ok(None);
+            }
+        }
+
+        if self.position >= self.data.len() || field_name.is_empty() {
+            self.position = start_pos;
+            return Ok(None);
+        }
+
+        self.position += 1; // Skip ':'
+
+        // Parse length
+        let mut length_str = String::new();
+        while self.position < self.data.len() && self.data[self.position].is_ascii_digit() {
+            length_str.push(self.data[self.position] as char);
+            self.position += 1;
+        }
+
+        if length_str.is_empty() {
+            self.position = start_pos;
+            return Ok(None);
+        }
+
+        let length: usize = length_str.parse().map_err(|_| {
+            TransadifError::Parse(format!("Invalid length: {}", length_str))
+        })?;
+
+        // Check for optional type
+        let mut field_type = None;
+        if self.position < self.data.len() && self.data[self.position] == b':' {
+            self.position += 1; // Skip ':'
+            let mut type_str = String::new();
+            while self.position < self.data.len() && self.data[self.position] != b'>' {
+                let ch = self.data[self.position] as char;
+                if ch.is_ascii_alphanumeric() || ch == '_' {
+                    type_str.push(ch);
+                    self.position += 1;
+                } else {
+                    break;
+                }
+            }
+            if !type_str.is_empty() {
+                field_type = Some(type_str);
+            }
+        }
+
+        // Expect '>'
+        if self.position >= self.data.len() || self.data[self.position] != b'>' {
+            self.position = start_pos;
+            return Ok(None);
+        }
+
+        self.position += 1; // Skip '>'
+
+        // Extract raw data
+        let data_start = self.position;
+        let data_end = std::cmp::min(self.position + length, self.data.len());
+        let mut raw_data = self.data[data_start..data_end].to_vec();
+        self.position = data_end;
+
+        // Consume excess data until next field
+        let mut excess_data = self.consume_until_next_field();
+
+        // Apply field count heuristics if needed
+        let mut actual_length = length;
+        if self.should_reinterpret_field_count(&raw_data, &excess_data) {
+            // Try reinterpreting as character count instead of byte count
+            if let Some((new_raw_data, new_excess_data)) = self.try_reinterpret_field_count(data_start, length, &excess_data) {
+                raw_data = new_raw_data;
+                excess_data = new_excess_data;
+                actual_length = raw_data.len();
+            }
+        }
+
+        // Convert raw data to string (initially as ISO-8859-1 for safety)
+        let data = String::from_utf8_lossy(&raw_data).to_string();
+
+        Ok(Some(AdifField {
+            name: field_name,
+            length: actual_length,
             field_type,
             data,
-            excess_data: String::new(),
-        })
+            raw_data,
+            excess_data,
+        }))
     }
 
-    /// Clean field data by removing obvious excess content
-    fn clean_field_data(&self, data: &str, field_name: &str) -> String {
-        // Remove content that appears to be from the next field (starts with '<')
-        if let Some(pos) = data.find('<') {
-            let cleaned = data[..pos].trim_end().to_string();
-            if !cleaned.is_empty() {
-                return cleaned;
+    fn check_for_eoh(&self) -> bool {
+        self.check_for_tag(b"eoh")
+    }
+
+    fn check_for_eor(&self) -> bool {
+        self.check_for_tag(b"eor")
+    }
+
+    fn check_for_tag(&self, tag: &[u8]) -> bool {
+        if self.position + tag.len() + 2 > self.data.len() {
+            return false;
+        }
+
+        if self.data[self.position] != b'<' {
+            return false;
+        }
+
+        let tag_start = self.position + 1;
+        let tag_end = tag_start + tag.len();
+
+        if tag_end >= self.data.len() || self.data[tag_end] != b'>' {
+            return false;
+        }
+
+        let found_tag = &self.data[tag_start..tag_end];
+        found_tag.to_ascii_lowercase() == tag
+    }
+
+    fn skip_eoh(&mut self) {
+        self.skip_tag(b"eoh");
+    }
+
+    fn skip_eor(&mut self) {
+        self.skip_tag(b"eor");
+    }
+
+    fn skip_tag(&mut self, tag: &[u8]) {
+        if self.check_for_tag(tag) {
+            self.position += tag.len() + 2; // Skip '<tag>'
+        }
+    }
+
+    fn consume_until_next_field(&mut self) -> String {
+        let start = self.position;
+        while self.position < self.data.len() {
+            if self.data[self.position] == b'<' {
+                // Check if this is a valid field start or EOR/EOH
+                if self.check_for_eor() || self.check_for_eoh() {
+                    break;
+                }
+
+                let saved_pos = self.position;
+                if self.parse_field().unwrap_or(None).is_some() {
+                    // This was a valid field, backtrack
+                    self.position = saved_pos;
+                    break;
+                } else {
+                    // Not a valid field, continue
+                    self.position = saved_pos + 1;
+                }
+            } else {
+                self.position += 1;
             }
         }
 
-        // Try to detect field boundaries by looking for patterns that suggest the next field
-        // Look for newlines followed by what looks like field content
-        let lines: Vec<&str> = data.lines().collect();
-        if lines.len() > 1 {
-            // Check if the first line contains the main field content
-            let first_line = lines[0].trim();
-            if !first_line.is_empty() {
-                // For name fields, check if first line looks like a complete name
-                if field_name.to_lowercase() == "name" &&
-                   first_line.chars().all(|c| c.is_alphabetic() || c.is_whitespace() || "áéíóúñüç".contains(c)) {
-                    return first_line.to_string();
+        String::from_utf8_lossy(&self.data[start..self.position]).to_string()
+    }
+
+    fn should_reinterpret_field_count(&self, raw_data: &[u8], excess_data: &str) -> bool {
+        // Check if excess data contains non-whitespace characters
+        let has_non_whitespace_excess = !excess_data.trim().is_empty();
+
+        // Check if raw data OR excess data contains UTF-8 sequences (including corrupted ones)
+        let has_utf8_in_raw = std::str::from_utf8(raw_data).is_ok() &&
+                             raw_data.iter().any(|&b| b > 127);
+
+        let has_utf8_in_excess = excess_data.chars().any(|c| c as u32 > 127);
+
+        let has_utf8_sequences = has_utf8_in_raw || has_utf8_in_excess;
+
+
+        has_non_whitespace_excess && has_utf8_sequences
+    }
+
+    fn try_reinterpret_field_count(&self, data_start: usize, original_length: usize, excess_data: &str) -> Option<(Vec<u8>, String)> {
+        // Try to find the actual end of the field by looking for UTF-8 character boundaries
+        let available_data = &self.data[data_start..];
+
+        // Try to decode as UTF-8 and count characters
+        if let Ok(utf8_str) = std::str::from_utf8(available_data) {
+            let chars: Vec<char> = utf8_str.chars().collect();
+            if chars.len() >= original_length {
+                // Take the specified number of characters instead of bytes
+                let char_data: String = chars.iter().take(original_length).collect();
+                let char_bytes = char_data.as_bytes().to_vec();
+
+                // Calculate new excess data
+                let char_byte_len = char_bytes.len();
+                let remaining_start = data_start + char_byte_len;
+                let remaining_data = &self.data[remaining_start..];
+
+                // Find where the next field starts
+                let mut new_excess_data = String::new();
+                for (i, &byte) in remaining_data.iter().enumerate() {
+                    if byte == b'<' {
+                        // Check if this might be a field or tag
+                        let remaining = &remaining_data[i..];
+                        if remaining.len() > 1 {
+                            new_excess_data = String::from_utf8_lossy(&remaining_data[..i]).to_string();
+                            break;
+                        }
+                    }
                 }
 
-                // For other fields, if the second line starts with something that looks like a field tag,
-                // use only the first line
-                if lines.len() > 1 && lines[1].trim().starts_with('<') {
-                    return first_line.to_string();
+                // Only reinterpret if the new excess data is mostly whitespace
+                if new_excess_data.trim().is_empty() || new_excess_data.trim().len() < excess_data.trim().len() {
+                    return Some((char_bytes, new_excess_data));
                 }
             }
         }
 
-        data.to_string()
-    }
-
-    /// Determine the correct field length after mojibake correction
-    fn determine_correct_field_length(&self, original_data: &str, corrected_data: &str, original_length: usize, encoding: &'static Encoding) -> Result<usize> {
-        let actual_char_count = corrected_data.chars().count();
-        let actual_byte_count = corrected_data.as_bytes().len();
-
-
-
-        // If the original length doesn't match the actual character count,
-        // but the data contains UTF-8 characters, it's likely a field count mismatch
-        if original_length != actual_char_count && actual_byte_count > actual_char_count {
-            // This suggests the original length was counted in bytes of mojibake
-            // but the actual data is UTF-8, so use character count
-            return Ok(actual_char_count);
-        }
-
-        // For UTF-8 encoding, always use character count
-        if encoding == encoding_rs::UTF_8 {
-            return Ok(actual_char_count);
-        }
-
-        // If data was corrected (mojibake fix applied), use character count
-        if corrected_data != original_data {
-            return Ok(actual_char_count);
-        }
-
-        // If original length matches character count, use that
-        if original_length == actual_char_count {
-            return Ok(actual_char_count);
-        }
-
-        // If original length matches byte count, use that
-        if original_length == actual_byte_count {
-            return Ok(actual_byte_count);
-        }
-
-        // Default to character count for consistency
-        Ok(actual_char_count)
-    }
-
-    fn extract_excess_data<'a>(&self, text: &'a str) -> (String, &'a str) {
-        // Find the next field start
-        if let Some(field_match) = self.field_regex.find(text) {
-            (text[..field_match.start()].to_string(), &text[field_match.start()..])
-        } else {
-            (text.to_string(), "")
-        }
-    }
-}
-
-impl AdifFile {
-    pub fn parse(data: &[u8], opts: &EncodingOptions) -> Result<Self> {
-        let parser = AdifParser::new();
-        parser.parse(data, opts)
-    }
-
-    /// Get encoding from header fields
-    pub fn get_encoding(&self) -> Option<String> {
-        self.header.fields.iter()
-            .find(|f| f.name.to_uppercase() == "ENCODING")
-            .map(|f| f.data.clone())
-    }
-
-    /// Set or update encoding in header
-    pub fn set_encoding(&mut self, encoding: &str) {
-        // Remove existing encoding field
-        self.header.fields.retain(|f| f.name.to_uppercase() != "ENCODING");
-
-        // Add new encoding field after PROGRAMID if it exists, otherwise at the beginning
-        let insert_pos = if let Some(pos) = self.header.fields.iter().position(|f| f.name.to_uppercase() == "PROGRAMID") {
-            pos + 1
-        } else {
-            0
-        };
-
-        self.header.fields.insert(insert_pos, AdifField {
-            name: "encoding".to_string(),
-            length: encoding.len(),
-            field_type: None,
-            data: encoding.to_string(),
-            excess_data: String::new(),
-        });
-    }
-
-    /// Ensure PROGRAMID is set to TransADIF
-    pub fn set_program_id(&mut self) {
-        // Remove existing PROGRAMID field
-        self.header.fields.retain(|f| f.name.to_uppercase() != "PROGRAMID");
-
-        // Add TransADIF PROGRAMID at the beginning
-        let program_id = "TransADIF";
-        self.header.fields.insert(0, AdifField {
-            name: "programid".to_string(),
-            length: program_id.len(),
-            field_type: None,
-            data: program_id.to_string(),
-            excess_data: String::new(),
-        });
+        None
     }
 }

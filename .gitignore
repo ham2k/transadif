@@ -1,17 +1,18 @@
-# Rust build artifacts
+# Rust
 /target/
-**/*.rs.bk
 Cargo.lock
 
-# Debug files
-*.pdb
-
-# IDE files
+# IDE
 .vscode/
 .idea/
 *.swp
 *.swo
+*~
 
-# OS files
+# OS
 .DS_Store
 Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
