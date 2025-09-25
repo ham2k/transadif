@@ -1,5 +1,10 @@
 use crate::error::{Result, TransAdifError};
 use encoding_rs::{Encoding, UTF_8, WINDOWS_1252};
+
+struct CorrectedSequence {
+    corrected: String,
+    original_len: usize,
+}
 use regex::Regex;
 use unicode_normalization::UnicodeNormalization;
 use unidecode::unidecode;
@@ -37,6 +42,14 @@ impl EncodingDetector {
 
         // Check if it's valid UTF-8
         if std::str::from_utf8(data).is_ok() {
+            let text = std::str::from_utf8(data).unwrap();
+
+            // Even if it's valid UTF-8, check if it contains mojibake patterns
+            // that suggest it was originally ISO-8859-1 with UTF-8 sequences
+            if self.contains_mojibake_patterns(text) {
+                return Ok(WINDOWS_1252);
+            }
+
             // Check if it contains non-ASCII characters
             if data.iter().any(|&b| b > 127) {
                 return Ok(UTF_8);
@@ -95,7 +108,7 @@ impl EncodingDetector {
     /// Convert data to Unicode string, applying corrections
     pub fn decode_to_unicode(&self, data: &[u8], encoding: &'static Encoding, strict: bool) -> Result<String> {
         let (decoded, _, had_errors) = encoding.decode(data);
-        
+
         if had_errors && strict {
             return Err(TransAdifError::StrictMode(
                 "Invalid characters found in strict mode".to_string()
@@ -136,31 +149,10 @@ impl EncodingDetector {
     }
 
     /// Detect and correct mojibake
-    fn correct_mojibake(&self, text: &str, original_encoding: &'static Encoding) -> Result<String> {
-        // If original encoding is not UTF-8, look for UTF-8 sequences
+    pub fn correct_mojibake(&self, text: &str, original_encoding: &'static Encoding) -> Result<String> {
+        // If original encoding is not UTF-8, look for UTF-8 sequences that were encoded as ISO-8859-1
         if original_encoding != UTF_8 {
-            // Look for sequences that might be UTF-8 encoded as the original encoding
-            let mut result = text.to_string();
-            let bytes = text.as_bytes();
-            
-            // Look for potential UTF-8 sequences
-            let mut i = 0;
-            while i < bytes.len() {
-                if bytes[i] > 127 {
-                    // Try to find a UTF-8 sequence
-                    if let Some((utf8_str, len)) = self.extract_utf8_sequence(&bytes[i..]) {
-                        // Replace the mojibake with the correct UTF-8 character
-                        let start_char_idx = text.char_indices().nth(i).map(|(idx, _)| idx).unwrap_or(i);
-                        let end_char_idx = text.char_indices().nth(i + len).map(|(idx, _)| idx).unwrap_or(text.len());
-                        
-                        result.replace_range(start_char_idx..end_char_idx, &utf8_str);
-                        i += len;
-                        continue;
-                    }
-                }
-                i += 1;
-            }
-            return Ok(result);
+            return self.correct_utf8_as_iso(text);
         }
 
         // If original encoding is UTF-8, look for invalid sequences that might be ISO-8859-1
@@ -178,6 +170,193 @@ impl EncodingDetector {
         }
 
         Ok(text.to_string())
+    }
+
+    /// Correct UTF-8 sequences that were encoded as ISO-8859-1 (mojibake)
+    fn correct_utf8_as_iso(&self, text: &str) -> Result<String> {
+        // Apply general UTF-8 mojibake correction
+        let result = self.correct_general_mojibake(text)?;
+
+        Ok(result)
+    }
+
+
+    /// Apply general UTF-8 mojibake correction
+    fn correct_general_mojibake(&self, text: &str) -> Result<String> {
+        // Convert text back to bytes as if it were Windows-1252 encoded,
+        // then try to decode as UTF-8 to see if we get better results
+
+        // First, encode the text as Windows-1252 bytes
+        let (bytes, _encoding, had_errors) = WINDOWS_1252.encode(text);
+
+        // If encoding failed, this text contains characters not in Windows-1252
+        // so it's probably not mojibake
+        if had_errors {
+            return Ok(text.to_string());
+        }
+
+        // Try to decode those bytes as UTF-8
+        match std::str::from_utf8(&bytes) {
+            Ok(utf8_result) => {
+                // Successfully decoded as UTF-8
+                // Only use the result if it's different and looks reasonable
+                if utf8_result != text && self.is_reasonable_text(utf8_result) {
+                    Ok(utf8_result.to_string())
+                } else {
+                    Ok(text.to_string())
+                }
+            }
+            Err(_) => {
+                // Not valid UTF-8, return original
+                Ok(text.to_string())
+            }
+        }
+    }
+
+    /// Check if text looks reasonable (not just random bytes)
+    fn is_reasonable_text(&self, text: &str) -> bool {
+        // Text is reasonable if it:
+        // 1. Contains mostly printable characters
+        // 2. Doesn't contain too many control characters
+        // 3. Contains expected characters like letters, numbers, emojis
+
+        let total_chars = text.chars().count();
+        if total_chars == 0 {
+            return false;
+        }
+
+        let printable_chars = text.chars()
+            .filter(|c| c.is_alphanumeric() || c.is_whitespace() || c.is_ascii_punctuation() || (*c as u32) > 127)
+            .count();
+
+        // At least 80% should be printable
+        printable_chars as f64 / total_chars as f64 > 0.8
+    }
+
+    /// Try to correct a potential UTF-8 sequence that was decoded as Windows-1252
+    fn try_correct_utf8_sequence(&self, chars: &[char]) -> Option<CorrectedSequence> {
+        if chars.is_empty() {
+            return None;
+        }
+
+        // Try different sequence lengths (2, 3, 4 bytes for UTF-8)
+        for seq_len in 2..=4.min(chars.len()) {
+            let sequence = &chars[..seq_len];
+
+            // Convert characters back to bytes as if they were Windows-1252 decoded
+            let mut bytes = Vec::new();
+            let mut all_encodable = true;
+
+            for &ch in sequence {
+                let code_point = ch as u32;
+                // Check if this character could be a Windows-1252 decoded byte
+                if code_point <= 255 {
+                    bytes.push(code_point as u8);
+                } else if let Some(byte) = self.unicode_to_windows1252_byte(ch) {
+                    bytes.push(byte);
+                } else {
+                    all_encodable = false;
+                    break;
+                }
+            }
+
+            if all_encodable {
+                // Try to decode as UTF-8
+                if let Ok(utf8_str) = std::str::from_utf8(&bytes) {
+                    // Check if the result looks more reasonable than the original
+                    if self.looks_like_better_text(utf8_str, &sequence.iter().collect::<String>()) {
+                        return Some(CorrectedSequence {
+                            corrected: utf8_str.to_string(),
+                            original_len: seq_len,
+                        });
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Convert a Unicode character to its Windows-1252 byte if possible
+    fn unicode_to_windows1252_byte(&self, ch: char) -> Option<u8> {
+        // Handle special Windows-1252 characters that map to specific bytes
+        match ch {
+            '\u{0152}' => Some(0x8C), // Œ
+            '\u{0153}' => Some(0x9C), // œ
+            '\u{0160}' => Some(0x8A), // Š
+            '\u{0161}' => Some(0x9A), // š
+            '\u{0178}' => Some(0x9F), // Ÿ
+            '\u{017D}' => Some(0x8E), // Ž
+            '\u{017E}' => Some(0x9E), // ž
+            '\u{0192}' => Some(0x83), // ƒ
+            '\u{02C6}' => Some(0x88), // ˆ
+            '\u{02DC}' => Some(0x98), // ˜
+            '\u{2013}' => Some(0x96), // –
+            '\u{2014}' => Some(0x97), // —
+            '\u{2018}' => Some(0x91), // '
+            '\u{2019}' => Some(0x92), // '
+            '\u{201A}' => Some(0x82), // ‚
+            '\u{201C}' => Some(0x93), // "
+            '\u{201D}' => Some(0x94), // "
+            '\u{201E}' => Some(0x84), // „
+            '\u{2020}' => Some(0x86), // †
+            '\u{2021}' => Some(0x87), // ‡
+            '\u{2022}' => Some(0x95), // •
+            '\u{2026}' => Some(0x85), // …
+            '\u{2030}' => Some(0x89), // ‰
+            '\u{2039}' => Some(0x8B), // ‹
+            '\u{203A}' => Some(0x9B), // ›
+            '\u{20AC}' => Some(0x80), // €
+            '\u{2122}' => Some(0x99), // ™
+            _ => {
+                let code = ch as u32;
+                if code <= 255 {
+                    Some(code as u8)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// Check if the corrected text looks better than the original
+    fn looks_like_better_text(&self, corrected: &str, original: &str) -> bool {
+        // Prefer text that:
+        // 1. Contains common Unicode characters (emojis, proper punctuation)
+        // 2. Doesn't contain unusual combining marks in wrong contexts
+        // 3. Is actually different from the original
+
+        if corrected == original {
+            return false;
+        }
+
+        // Check for improvement indicators
+        let has_emojis = corrected.chars().any(|c| {
+            let code = c as u32;
+            // Emoji ranges
+            (0x1F600..=0x1F64F).contains(&code) || // Emoticons
+            (0x1F300..=0x1F5FF).contains(&code) || // Misc Symbols
+            (0x1F680..=0x1F6FF).contains(&code) || // Transport
+            (0x2600..=0x26FF).contains(&code) ||   // Misc symbols
+            (0x2700..=0x27BF).contains(&code)     // Dingbats
+        });
+
+        let has_proper_variation_selectors = corrected.contains('\u{FE0F}'); // Variation Selector-16
+        let has_suspicious_combining = original.contains('\u{FE1D}'); // Suspicious combining mark
+
+        has_emojis || has_proper_variation_selectors || has_suspicious_combining
+    }
+
+    /// Check if text contains patterns that suggest mojibake
+    fn contains_mojibake_patterns(&self, text: &str) -> bool {
+        // Look for common mojibake patterns
+        // UTF-8 sequences that would appear when ISO-8859-1 is misinterpreted
+        if text.contains("Ã©") || text.contains("Ã¡") || text.contains("Ã±") {
+            return true;
+        }
+
+        // Look for high-byte characters that might be mojibake
+        text.chars().any(|c| c as u32 > 127 && (c as u32) < 256)
     }
 
     /// Try to extract a UTF-8 sequence from bytes
@@ -252,11 +431,11 @@ impl EncodingDetector {
     /// Handle characters incompatible with target encoding
     fn handle_incompatible_chars(&self, text: &str, encoding: &'static Encoding, opts: &EncodingOptions) -> Result<String> {
         let mut result = String::new();
-        
+
         for ch in text.chars() {
             let ch_str = ch.to_string();
             let (_, _, had_errors) = encoding.encode(&ch_str);
-            
+
             if had_errors {
                 if opts.delete_incompatible {
                     // Skip the character
@@ -279,7 +458,7 @@ impl EncodingDetector {
                 result.push(ch);
             }
         }
-        
+
         Ok(result)
     }
 

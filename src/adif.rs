@@ -1,5 +1,6 @@
 use crate::encoding::{EncodingDetector, EncodingOptions};
 use crate::error::{Result, TransAdifError};
+use encoding_rs::Encoding;
 use regex::Regex;
 
 #[derive(Debug, Clone)]
@@ -54,9 +55,9 @@ impl AdifParser {
         // Decode to Unicode
         let text = self.encoding_detector.decode_to_unicode(data, encoding, opts.strict_mode)?;
 
-        // Parse structure
+        // Parse structure with encoding context for field-level mojibake correction
         let (header, remaining) = self.parse_header(&text)?;
-        let records = self.parse_records(&remaining, opts)?;
+        let records = self.parse_records_with_encoding(&remaining, opts, encoding)?;
 
         Ok(AdifFile { header, records })
     }
@@ -133,7 +134,7 @@ impl AdifParser {
                 }
             }
 
-            let field = self.parse_field_at_match(header_text, &field_match)?;
+            let field = self.parse_field_at_match_simple(header_text, &field_match)?;
             current_pos = field_match.end() + field.data.len();
             fields.push(field);
         }
@@ -151,14 +152,14 @@ impl AdifParser {
         Ok((preamble, fields, excess_data))
     }
 
-    fn parse_records(&self, text: &str, opts: &EncodingOptions) -> Result<Vec<AdifRecord>> {
+    fn parse_records_with_encoding(&self, text: &str, opts: &EncodingOptions, encoding: &'static Encoding) -> Result<Vec<AdifRecord>> {
         let mut records = Vec::new();
         let mut remaining = text;
 
         while !remaining.trim().is_empty() {
             if let Some(eor_match) = self.eor_regex.find(remaining) {
                 let record_text = &remaining[..eor_match.start()];
-                let record = self.parse_single_record(record_text, opts)?;
+                let record = self.parse_single_record_with_encoding(record_text, opts, encoding)?;
                 records.push(record);
 
                 // Extract excess data after <eor>
@@ -173,7 +174,7 @@ impl AdifParser {
             } else {
                 // No more <eor> tags, parse remaining as incomplete record
                 if !remaining.trim().is_empty() {
-                    let record = self.parse_single_record(remaining, opts)?;
+                    let record = self.parse_single_record_with_encoding(remaining, opts, encoding)?;
                     records.push(record);
                 }
                 break;
@@ -183,7 +184,7 @@ impl AdifParser {
         Ok(records)
     }
 
-    fn parse_single_record(&self, record_text: &str, _opts: &EncodingOptions) -> Result<AdifRecord> {
+    fn parse_single_record_with_encoding(&self, record_text: &str, opts: &EncodingOptions, encoding: &'static Encoding) -> Result<AdifRecord> {
         let mut fields: Vec<AdifField> = Vec::new();
         let mut current_pos = 0;
 
@@ -195,7 +196,7 @@ impl AdifParser {
                 }
             }
 
-            let field = self.parse_field_at_match(record_text, &field_match)?;
+            let field = self.parse_field_at_match_with_encoding(record_text, &field_match, opts, encoding)?;
             current_pos = field_match.end() + field.data.len();
             fields.push(field);
         }
@@ -210,7 +211,7 @@ impl AdifParser {
         Ok(AdifRecord { fields, excess_data })
     }
 
-    fn parse_field_at_match(&self, text: &str, field_match: &regex::Match) -> Result<AdifField> {
+    fn parse_field_at_match_with_encoding(&self, text: &str, field_match: &regex::Match, opts: &EncodingOptions, encoding: &'static Encoding) -> Result<AdifField> {
         let captures = self.field_regex.captures(&text[field_match.range()]).unwrap();
 
         let name = captures.get(1).unwrap().as_str().to_string();
@@ -225,7 +226,14 @@ impl AdifParser {
         // First try byte-based extraction (traditional ADIF)
         let data_end_byte = data_start_byte + length;
         let data = if data_end_byte <= text.len() {
-            let candidate = text[data_start_byte..data_end_byte].to_string();
+            // Check if the slice boundaries are on character boundaries
+            let candidate = if text.is_char_boundary(data_start_byte) && text.is_char_boundary(data_end_byte) {
+                text[data_start_byte..data_end_byte].to_string()
+            } else {
+                // If not on character boundaries, fall back to character-based extraction
+                let char_start = text[..data_start_byte].chars().count();
+                text.chars().skip(char_start).take(length).collect::<String>()
+            };
 
             // Check if this extraction resulted in valid UTF-8 and reasonable length
             // If the candidate is shorter in characters than expected,
@@ -255,6 +263,51 @@ impl AdifParser {
             char_extracted
         };
 
+        // Apply mojibake correction to field data if not in strict mode
+        let corrected_data = if !opts.strict_mode {
+            let mojibake_corrected = self.encoding_detector.correct_mojibake(&data, encoding)?;
+            // Clean up the field data by removing obvious excess content
+            let cleaned = self.clean_field_data(&mojibake_corrected, &name);
+            // Additional cleanup: trim trailing whitespace/newlines
+            cleaned.trim_end().to_string()
+        } else {
+            data.clone()
+        };
+
+        // Determine correct field length based on encoding and data
+        let corrected_length = self.determine_correct_field_length(&data, &corrected_data, length, encoding)?;
+
+
+        Ok(AdifField {
+            name,
+            length: corrected_length,
+            field_type,
+            data: corrected_data,
+            excess_data: String::new(),
+        })
+    }
+
+    fn parse_field_at_match_simple(&self, text: &str, field_match: &regex::Match) -> Result<AdifField> {
+        let captures = self.field_regex.captures(&text[field_match.range()]).unwrap();
+
+        let name = captures.get(1).unwrap().as_str().to_string();
+        let length_str = captures.get(2).unwrap().as_str();
+        let length = length_str.parse::<usize>()
+            .map_err(|_| TransAdifError::InvalidField(format!("Invalid length: {}", length_str)))?;
+        let field_type = captures.get(3).map(|m| m.as_str().to_string());
+
+        // Extract field data - simple version for headers (no mojibake correction)
+        let data_start_byte = field_match.end();
+        let data_end_byte = data_start_byte + length;
+        let data = if data_end_byte <= text.len() {
+            text[data_start_byte..data_end_byte].to_string()
+        } else {
+            return Err(TransAdifError::Parse {
+                pos: data_start_byte,
+                msg: format!("Field {} claims length {} but insufficient data", name, length),
+            });
+        };
+
         Ok(AdifField {
             name,
             length,
@@ -262,6 +315,79 @@ impl AdifParser {
             data,
             excess_data: String::new(),
         })
+    }
+
+    /// Clean field data by removing obvious excess content
+    fn clean_field_data(&self, data: &str, field_name: &str) -> String {
+        // Remove content that appears to be from the next field (starts with '<')
+        if let Some(pos) = data.find('<') {
+            let cleaned = data[..pos].trim_end().to_string();
+            if !cleaned.is_empty() {
+                return cleaned;
+            }
+        }
+
+        // Try to detect field boundaries by looking for patterns that suggest the next field
+        // Look for newlines followed by what looks like field content
+        let lines: Vec<&str> = data.lines().collect();
+        if lines.len() > 1 {
+            // Check if the first line contains the main field content
+            let first_line = lines[0].trim();
+            if !first_line.is_empty() {
+                // For name fields, check if first line looks like a complete name
+                if field_name.to_lowercase() == "name" &&
+                   first_line.chars().all(|c| c.is_alphabetic() || c.is_whitespace() || "áéíóúñüç".contains(c)) {
+                    return first_line.to_string();
+                }
+
+                // For other fields, if the second line starts with something that looks like a field tag,
+                // use only the first line
+                if lines.len() > 1 && lines[1].trim().starts_with('<') {
+                    return first_line.to_string();
+                }
+            }
+        }
+
+        data.to_string()
+    }
+
+    /// Determine the correct field length after mojibake correction
+    fn determine_correct_field_length(&self, original_data: &str, corrected_data: &str, original_length: usize, encoding: &'static Encoding) -> Result<usize> {
+        let actual_char_count = corrected_data.chars().count();
+        let actual_byte_count = corrected_data.as_bytes().len();
+
+
+
+        // If the original length doesn't match the actual character count,
+        // but the data contains UTF-8 characters, it's likely a field count mismatch
+        if original_length != actual_char_count && actual_byte_count > actual_char_count {
+            // This suggests the original length was counted in bytes of mojibake
+            // but the actual data is UTF-8, so use character count
+            return Ok(actual_char_count);
+        }
+
+        // For UTF-8 encoding, always use character count
+        if encoding == encoding_rs::UTF_8 {
+            return Ok(actual_char_count);
+        }
+
+        // If data was corrected (mojibake fix applied), use character count
+        if corrected_data != original_data {
+            return Ok(actual_char_count);
+        }
+
+        // If original length matches character count, use that
+        if original_length == actual_char_count {
+            return Ok(actual_char_count);
+        }
+
+        // If original length matches byte count, use that
+        if original_length == actual_byte_count {
+            return Ok(actual_byte_count);
+        }
+
+        // Default to character count for consistency
+        Ok(actual_char_count)
     }
 
     fn extract_excess_data<'a>(&self, text: &'a str) -> (String, &'a str) {
@@ -300,7 +426,7 @@ impl AdifFile {
         };
 
         self.header.fields.insert(insert_pos, AdifField {
-            name: "ENCODING".to_string(),
+            name: "encoding".to_string(),
             length: encoding.len(),
             field_type: None,
             data: encoding.to_string(),
@@ -316,7 +442,7 @@ impl AdifFile {
         // Add TransADIF PROGRAMID at the beginning
         let program_id = "TransADIF";
         self.header.fields.insert(0, AdifField {
-            name: "PROGRAMID".to_string(),
+            name: "programid".to_string(),
             length: program_id.len(),
             field_type: None,
             data: program_id.to_string(),

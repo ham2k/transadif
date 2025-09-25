@@ -5,16 +5,27 @@ use crate::error::Result;
 pub fn generate_adif(adif_file: &mut AdifFile, opts: &EncodingOptions) -> Result<Vec<u8>> {
     let encoding_detector = EncodingDetector::new();
 
-    // Always set encoding in output
+    // Only set encoding in output if the original had header fields or if encoding changed
     let output_encoding = if opts.output_encoding.to_lowercase() == "utf-8" {
         "UTF-8".to_string()
     } else {
         opts.output_encoding.clone()
     };
-    adif_file.set_encoding(&output_encoding);
 
-    // Ensure TransADIF program ID
-    adif_file.set_program_id();
+    // Check if the original file had any header fields and specifically an encoding field
+    let has_existing_header_fields = !adif_file.header.fields.is_empty();
+    let has_existing_encoding_field = adif_file.header.fields.iter()
+        .any(|field| field.name.to_lowercase() == "encoding");
+
+    // Add encoding field if there are header fields
+    if has_existing_encoding_field || has_existing_header_fields {
+        adif_file.set_encoding(&output_encoding);
+    }
+
+    // Add/update program ID if there were already header fields
+    if has_existing_header_fields {
+        adif_file.set_program_id();
+    }
 
     // Generate the output string
     let mut output = String::new();
@@ -80,10 +91,11 @@ fn write_record(output: &mut String, record: &crate::adif::AdifRecord, opts: &En
 fn write_field(output: &mut String, field: &AdifField, opts: &EncodingOptions) -> Result<()> {
     let encoding_detector = EncodingDetector::new();
 
-    // For UTF-8 output, use the original string directly to avoid encoding issues
+    // For UTF-8 output, use the field data and corrected length
     let (final_string, length) = if opts.output_encoding.to_lowercase() == "utf-8" {
         let string = field.data.clone();
-        let char_count = string.chars().count();
+        // Use the corrected length from the field (after mojibake correction)
+        let char_count = field.length;
         (string, char_count)
     } else {
         // For non-UTF-8, process through encoding pipeline
@@ -155,3 +167,4 @@ mod tests {
         assert!(result.is_ok());
     }
 }
+

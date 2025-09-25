@@ -103,6 +103,8 @@ The comparison with the expected output file should be byte-by-byte, without usi
 
 The test running tool should accept a parameter to run only specific tests whose filenames or directories match a given string.
 
+And never create special logic in the code designed to hack around a specific test case.
+
 # Usage
 
 ```

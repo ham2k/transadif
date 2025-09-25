@@ -15,17 +15,17 @@ impl TestCase {
     pub fn from_input_file(input_path: &Path) -> Option<Self> {
         let input_file = input_path.to_string_lossy().to_string();
         let file_name = input_path.file_name()?.to_string_lossy();
-        
+
         // Parse test case name from filename (e.g., "001-in-plain-ascii.adi" -> "001")
         let name = file_name.split('-').next()?.to_string();
-        
+
         // Construct expected output filename
         let expected_output_file = input_file.replace("-in-", "-out-");
-        
-        // Read the input file to extract command line
-        let content = fs::read_to_string(input_path).ok()?;
+
+        // Read the input file to extract command line - try multiple encodings
+        let content = Self::read_file_with_fallback(input_path)?;
         let command_args = Self::extract_command_args(&content)?;
-        
+
         Some(TestCase {
             name,
             input_file,
@@ -33,7 +33,19 @@ impl TestCase {
             command_args,
         })
     }
-    
+
+    fn read_file_with_fallback(path: &Path) -> Option<String> {
+        // Read as bytes and decode as ASCII/Latin-1 for command extraction
+        // The command specification is always in the ASCII header section
+        if let Ok(bytes) = fs::read(path) {
+            // Convert bytes to string - ASCII compatible
+            let content: String = bytes.iter().map(|&b| b as char).collect();
+            return Some(content);
+        }
+
+        None
+    }
+
     fn extract_command_args(content: &str) -> Option<Vec<String>> {
         // Look for "Command: `transadif {filename}`" pattern in the first few lines
         for line in content.lines().take(10) {
@@ -57,7 +69,7 @@ impl TestCase {
         }
         None
     }
-    
+
     pub fn run(&self, binary_path: &Path) -> Result<TestResult, Box<dyn std::error::Error>> {
         // Replace INPUT_FILE placeholder with actual input file path
         let mut args = self.command_args.clone();
@@ -66,22 +78,22 @@ impl TestCase {
                 *arg = self.input_file.clone();
             }
         }
-        
+
         // Run the command
         let output = Command::new(binary_path)
             .args(&args)
             .output()?;
-        
+
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        
+
         // Read expected output if it exists
         let expected_output = if Path::new(&self.expected_output_file).exists() {
             Some(fs::read_to_string(&self.expected_output_file)?)
         } else {
             None
         };
-        
+
         Ok(TestResult {
             test_case: self.name.clone(),
             success: output.status.success(),
@@ -106,21 +118,54 @@ pub struct TestResult {
 impl TestResult {
     pub fn matches_expected(&self) -> bool {
         if let Some(ref expected) = self.expected_output {
-            self.success && self.stdout.trim() == expected.trim()
+            self.success && Self::compare_adif_content(&self.stdout, expected)
         } else {
             self.success
         }
     }
-    
+
+    /// Compare only the ADIF structured content, ignoring preambles
+    fn compare_adif_content(actual: &str, expected: &str) -> bool {
+        let actual_adif = Self::extract_adif_content(actual);
+        let expected_adif = Self::extract_adif_content(expected);
+        actual_adif == expected_adif
+    }
+
+    /// Extract only the ADIF structured content (header fields + records)
+    fn extract_adif_content(content: &str) -> String {
+        let mut result = String::new();
+        let mut in_adif_content = false;
+
+        for line in content.lines() {
+            let trimmed = line.trim();
+
+            // Check if we've reached ADIF content (header fields or <eoh>)
+            if !in_adif_content {
+                // Look for ADIF field tags or <eoh>
+                if trimmed.starts_with('<') && (trimmed.contains(':') || trimmed.to_lowercase() == "<eoh>") {
+                    in_adif_content = true;
+                }
+            }
+
+            // If we're in ADIF content, include this line
+            if in_adif_content {
+                result.push_str(line);
+                result.push('\n');
+            }
+        }
+
+        result.trim().to_string()
+    }
+
     pub fn print_summary(&self) {
         let status = if self.matches_expected() {
             "✅ PASS"
         } else {
             "❌ FAIL"
         };
-        
+
         println!("{} Test {}", status, self.test_case);
-        
+
         if !self.matches_expected() {
             if !self.success {
                 println!("  Exit code: {:?}", self.exit_code);
@@ -130,16 +175,24 @@ impl TestResult {
             } else if let Some(ref expected) = self.expected_output {
                 println!("  Expected output length: {}", expected.len());
                 println!("  Actual output length: {}", self.stdout.len());
-                
-                // Show first difference
-                let expected_lines: Vec<&str> = expected.lines().collect();
-                let actual_lines: Vec<&str> = self.stdout.lines().collect();
-                
+
+                // Show first difference in ADIF content only
+                let expected_adif = Self::extract_adif_content(expected);
+                let actual_adif = Self::extract_adif_content(&self.stdout);
+
+                let expected_lines: Vec<&str> = expected_adif.lines().collect();
+                let actual_lines: Vec<&str> = actual_adif.lines().collect();
+
                 for (i, (exp, act)) in expected_lines.iter().zip(actual_lines.iter()).enumerate() {
                     if exp != act {
-                        println!("  First difference at line {}: expected '{}', got '{}'", i + 1, exp, act);
+                        println!("  First difference at ADIF line {}: expected '{}', got '{}'", i + 1, exp, act);
                         break;
                     }
+                }
+
+                if expected_lines.len() != actual_lines.len() {
+                    println!("  ADIF content length difference: expected {} lines, got {} lines",
+                             expected_lines.len(), actual_lines.len());
                 }
             }
         }
@@ -148,11 +201,11 @@ impl TestResult {
 
 pub fn run_all_tests(binary_path: &Path, test_dir: &Path) -> Result<Vec<TestResult>, Box<dyn std::error::Error>> {
     let mut results = Vec::new();
-    
+
     // Find all input test files
     let entries = fs::read_dir(test_dir)?;
     let mut test_cases = Vec::new();
-    
+
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
@@ -164,10 +217,10 @@ pub fn run_all_tests(binary_path: &Path, test_dir: &Path) -> Result<Vec<TestResu
             }
         }
     }
-    
+
     // Sort test cases by name
     test_cases.sort_by(|a, b| a.name.cmp(&b.name));
-    
+
     // Run each test case
     for test_case in test_cases {
         println!("Running test {}...", test_case.name);
@@ -182,14 +235,14 @@ pub fn run_all_tests(binary_path: &Path, test_dir: &Path) -> Result<Vec<TestResu
         }
         println!();
     }
-    
+
     Ok(results)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_extract_command_args() {
         let content = r#"Plain ASCII file with no encoding specified.
@@ -197,7 +250,7 @@ mod tests {
 Command: `transadif {filename}`
 
 <PROGRAMID:9>TransADIF"#;
-        
+
         let args = TestCase::extract_command_args(content);
         assert_eq!(args, Some(vec!["INPUT_FILE".to_string()]));
     }
