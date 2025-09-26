@@ -15,8 +15,8 @@ fn main() {
 fn run() -> Result<()> {
     let matches = Command::new("transadif")
         .version("0.1.0")
-        .author("Ham2K")
-        .about("A command-line tool for processing ADIF files with proper encoding handling")
+        .author("Sebastian Delmont KI2D <ki2d@ham2k.net> - Ham2K Technologies")
+        .about("A command-line tool for dealing with text encoding issues in ADIF files")
         .arg(
             Arg::new("input")
                 .help("Input ADIF file (reads from stdin if not specified)")

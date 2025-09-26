@@ -75,7 +75,7 @@ If the tool finds that `excessdata` for a field is anything other than whitespac
 
 ### Implementation Details
 
-The tool should be written in Rust, and should use the clap crate for command line parsing.
+The tool should be written in Rust.
 
 The tool should be written in a way that is easy to test, and should be able to run the test cases provided.
 
@@ -85,7 +85,12 @@ The tool should read input files as raw bytes, before interpreting the encoding 
 
 The output ADIF file should calculate field counts based on the processed Unicode string values and the output encoding, and not the original field counts.
 
+It should use the clap crate for command line parsing. It should use the htmlescape crate to manage HTML entity references. It should use the chardetng crate to detect the encoding of strings.
+
 Include any relevant entries in gitignore.
+
+To detect mojibake on a UTF-8 string, the tool should look for sequences of Unicode characters with code points between 192 and 223, followed by characters with code points between 128 and 191, and then verify if that sequence, when interpreted as bytes, corresponds to a valid UTF-8 sequences. If it does, the tool should replace that sequence by reinterpreting the bytes as UTF-8. This should be done recursively until no more sequences are found.
+
 
 # Test cases
 

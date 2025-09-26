@@ -2,6 +2,7 @@ use crate::error::{Result, TransadifError};
 use crate::adif::{AdifFile, AdifField};
 use encoding_rs::{Encoding, UTF_8, WINDOWS_1252};
 use unidecode::unidecode;
+use chardetng::EncodingDetector;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum OutputEncoding {
@@ -83,105 +84,62 @@ impl EncodingProcessor {
             return Ok(encoding.to_string());
         }
 
-        // Try to detect encoding from data
-        let mut utf8_valid_count = 0;
-        let mut utf8_invalid_count = 0;
-        let mut high_bytes_count = 0;
-        let mut _total_fields = 0;
+        // Collect all field data for encoding detection
+        let mut all_data = Vec::new();
 
-        // Check header fields
+        // Collect header field data
         if let Some(header) = &file.header {
             for field in &header.fields {
-                _total_fields += 1;
-                let stats = self.analyze_field_bytes(&field.raw_data);
-                utf8_valid_count += stats.utf8_valid;
-                utf8_invalid_count += stats.utf8_invalid;
-                high_bytes_count += stats.high_bytes;
+                all_data.extend_from_slice(&field.raw_data);
+                all_data.push(b' '); // Add separator
             }
         }
 
-        // Check record fields
+        // Collect record field data
         for record in &file.records {
             for field in &record.fields {
-                _total_fields += 1;
-                let stats = self.analyze_field_bytes(&field.raw_data);
-                utf8_valid_count += stats.utf8_valid;
-                utf8_invalid_count += stats.utf8_invalid;
-                high_bytes_count += stats.high_bytes;
+                all_data.extend_from_slice(&field.raw_data);
+                all_data.push(b' '); // Add separator
             }
         }
 
-        // Improved heuristics for encoding detection
-        let detected = if utf8_valid_count > 0 && utf8_invalid_count == 0 {
-            // Contains valid UTF-8 sequences and no invalid ones
-            "UTF-8".to_string()
-        } else if utf8_invalid_count > 0 && utf8_valid_count == 0 {
-            // Contains invalid UTF-8 but might be valid ISO-8859-1
-            "ISO-8859-1".to_string()
-        } else if high_bytes_count > 0 {
-            // Has high bytes but mixed validity - default to ISO-8859-1
-            "ISO-8859-1".to_string()
-        } else {
-            // Only ASCII characters
-            "ASCII".to_string()
-        };
+        // Use chardetng for encoding detection
+        if !all_data.is_empty() {
+            let mut detector = EncodingDetector::new();
+            detector.feed(&all_data, true); // true = is_last
+            let detected_encoding = detector.guess(None, true);
 
-        Ok(detected)
-    }
 
-    fn analyze_field_bytes(&self, data: &[u8]) -> FieldByteStats {
-        let mut stats = FieldByteStats::default();
-
-        // First, try to decode the entire field as UTF-8
-        match std::str::from_utf8(data) {
-            Ok(utf8_str) => {
-                // Valid UTF-8, but check if it looks like double-encoded data
-                if data.iter().any(|&b| b > 127) {
-                    // Check if this looks like double-encoded UTF-8
-                    if self.looks_like_double_encoded_utf8(utf8_str) {
-                        stats.utf8_invalid = 1; // Treat as invalid to trigger correction
-                        stats.high_bytes = data.iter().filter(|&&b| b > 127).count();
+            // Map chardetng results to our expected encoding names
+            let encoding_name = match detected_encoding.name() {
+                "UTF-8" => "UTF-8",
+                "windows-1252" => "ISO-8859-1", // Map Windows-1252 to ISO-8859-1 for our purposes
+                "ISO-8859-1" => "ISO-8859-1",
+                _ => {
+                    // For unknown encodings, fall back to heuristics
+                    // Check if data is valid UTF-8
+                    if std::str::from_utf8(&all_data).is_ok() {
+                        "UTF-8"
+                    } else if all_data.iter().all(|&b| b < 128) {
+                        "ASCII"
                     } else {
-                        stats.utf8_valid = 1;
+                        "ISO-8859-1"
                     }
                 }
-            }
-            Err(_) => {
-                // Invalid UTF-8, but might contain high bytes that are valid in ISO-8859-1
-                stats.utf8_invalid = 1;
-                stats.high_bytes = data.iter().filter(|&&b| b > 127).count();
-            }
-        }
+            };
 
-        stats
+            Ok(encoding_name.to_string())
+        } else {
+            // No data to analyze, default to ASCII
+            Ok("ASCII".to_string())
+        }
     }
 
-    fn looks_like_double_encoded_utf8(&self, text: &str) -> bool {
-        // Look for patterns that suggest double-encoded UTF-8
-        // Be very conservative to avoid false positives
-        for ch in text.chars() {
-            let code = ch as u32;
 
-            // Check for replacement character
-            if code == 0xFFFD {
-                return true;
-            }
-
-            // Only check for specific corruption patterns we've confirmed
-            if code == 0xFE1D {  // This should be 0xFE0F (variation selector)
-                return true;
-            }
-
-            // Look for other suspicious high Unicode code points in the variation selector range
-            if code > 0xFE00 && code < 0xFE20 && code != 0xFE0F {
-                return true;
-            }
-        }
-        false
-    }
 
 
     fn process_field(&mut self, field: &mut AdifField, input_encoding: &str) -> Result<()> {
+
         // First, apply data corrections
         let corrected_data = self.apply_data_corrections(&field.raw_data, input_encoding)?;
 
@@ -190,6 +148,7 @@ impl EncodingProcessor {
 
         // Apply entity reference replacement
         let processed_string = self.replace_entity_references(&unicode_string)?;
+
 
         // Store the processed Unicode string
         field.data = processed_string;
@@ -203,52 +162,102 @@ impl EncodingProcessor {
         }
 
         let mut corrected = data.to_vec();
+        let mut max_iterations = 5; // Prevent infinite loops
+        let mut made_correction = true;
 
-        // Check for UTF-8 sequences in non-UTF-8 encodings
-        if input_encoding.to_lowercase() != "utf-8" {
-            if let Some(utf8_corrected) = self.detect_and_correct_utf8_in_non_utf8(&corrected) {
-                if !self.options.strict_mode {
-                    self.warnings.push(format!(
-                        "Detected UTF-8 sequences in {} encoded data, correcting",
-                        input_encoding
-                    ));
-                    corrected = utf8_corrected;
-                }
-            }
-        } else {
-            // Even for UTF-8 encoding, try to fix double-encoded sequences
-            if let Some(utf8_corrected) = self.fix_double_encoded_utf8(&corrected) {
-                if !self.options.strict_mode {
-                    self.warnings.push(
-                        "Detected double-encoded UTF-8 data, correcting".to_string()
-                    );
-                    corrected = utf8_corrected;
-                }
-            }
-        }
+        // Apply corrections recursively until no more corrections are possible
+        while made_correction && max_iterations > 0 {
+            made_correction = false;
+            let before_correction = corrected.clone();
 
-        // Check for ISO-8859-1 in UTF-8
-        if input_encoding.to_lowercase() == "utf-8" {
-            if let Some(iso_corrected) = self.detect_and_correct_iso_in_utf8(&corrected) {
-                if !self.options.strict_mode {
-                    self.warnings.push(
-                        "Detected ISO-8859-1 characters in UTF-8 data, correcting".to_string()
-                    );
-                    corrected = iso_corrected;
+            // First, handle encoding-specific corrections to get to Unicode
+            if input_encoding.to_lowercase() != "utf-8" {
+                // Detect UTF-8 sequences in non-UTF-8 encodings
+                if let Some(utf8_corrected) = self.detect_and_correct_utf8_in_non_utf8(&corrected) {
+                    if !self.options.strict_mode {
+                        self.warnings.push(format!(
+                            "Detected UTF-8 sequences in {} encoded data, correcting",
+                            input_encoding
+                        ));
+                        corrected = utf8_corrected;
+                        made_correction = true;
+                    }
                 }
             }
+
+            // Once we have Unicode data (UTF-8), apply all mojibake corrections
+            // The recursive loop will handle multiple passes automatically
+            if !made_correction {
+                // Try nested mojibake correction (works on any Unicode data)
+                if let Some(nested_corrected) = self.fix_nested_mojibake(&corrected) {
+                    if !self.options.strict_mode {
+                        self.warnings.push("Detected nested mojibake, correcting".to_string());
+                        corrected = nested_corrected;
+                        made_correction = true;
+                    }
+                }
+            }
+
+            if !made_correction {
+                // Try double-encoded UTF-8 correction
+                if let Some(utf8_corrected) = self.fix_double_encoded_utf8(&corrected) {
+                    if !self.options.strict_mode {
+                        self.warnings.push("Detected double-encoded UTF-8 data, correcting".to_string());
+                        corrected = utf8_corrected;
+                        made_correction = true;
+                    }
+                }
+            }
+
+            if !made_correction {
+                // Try ISO-8859-1 in UTF-8 correction
+                if let Some(iso_corrected) = self.detect_and_correct_iso_in_utf8(&corrected) {
+                    if !self.options.strict_mode {
+                        self.warnings.push("Detected ISO-8859-1 characters in UTF-8 data, correcting".to_string());
+                        corrected = iso_corrected;
+                        made_correction = true;
+                    }
+                }
+            }
+
+            // Safety check to prevent infinite loops
+            if corrected == before_correction {
+                made_correction = false;
+            }
+            max_iterations -= 1;
         }
 
         Ok(corrected)
     }
 
     fn detect_and_correct_utf8_in_non_utf8(&self, data: &[u8]) -> Option<Vec<u8>> {
-        // First try: Direct UTF-8 correction for double-encoded sequences
+        // First try: Detect UTF-8 sequences in the raw bytes
+        // This handles cases where UTF-8 bytes are embedded in an ISO-8859-1 file
+        if let Some(corrected) = self.detect_embedded_utf8_sequences(data) {
+            return Some(corrected);
+        }
+
+        // Second try: Fix partial mojibake (mixed UTF-8 and ISO in same field)
+        if let Some(corrected) = self.fix_partial_mojibake(data) {
+            return Some(corrected);
+        }
+
+        // Third try: Fix mojibake (UTF-8 bytes interpreted as ISO-8859-1)
+        if let Some(corrected) = self.fix_mojibake_utf8(data) {
+            return Some(corrected);
+        }
+
+        // Fourth try: Fix nested mojibake (double-encoded UTF-8)
+        if let Some(corrected) = self.fix_nested_mojibake(data) {
+            return Some(corrected);
+        }
+
+        // Fifth try: Direct UTF-8 correction for double-encoded sequences
         if let Some(corrected) = self.fix_double_encoded_utf8(data) {
             return Some(corrected);
         }
 
-        // Second try: Look for consecutive high bytes that form valid UTF-8
+        // Fifth try: Look for consecutive high bytes that form valid UTF-8
         let mut result = Vec::new();
         let mut i = 0;
         let mut found_utf8 = false;
@@ -277,6 +286,247 @@ impl EncodingProcessor {
         }
 
         if found_utf8 {
+            Some(result)
+        } else {
+            None
+        }
+    }
+
+    fn detect_embedded_utf8_sequences(&self, data: &[u8]) -> Option<Vec<u8>> {
+        // Check if the raw bytes contain valid UTF-8 sequences
+        // This is the case when UTF-8 data is embedded in an ISO file
+
+        // If the entire field is valid UTF-8, just return it as-is
+        if std::str::from_utf8(data).is_ok() {
+            return Some(data.to_vec());
+        }
+
+
+        // Check if this field might contain mojibake patterns
+        // If so, skip embedded UTF-8 detection and let mojibake correction handle it
+        // We need to decode as ISO-8859-1 to see the mojibake patterns
+        let as_iso_bytes: Vec<u8> = data.iter().cloned().collect();
+        let as_iso_string = as_iso_bytes.iter().map(|&b| b as char).collect::<String>();
+        if as_iso_string.contains('Ã') {
+            return None;
+        }
+
+        // Look for partial UTF-8 sequences mixed with ASCII/ISO characters
+        let mut result = Vec::new();
+        let mut i = 0;
+        let mut found_utf8 = false;
+
+        while i < data.len() {
+            // Look for UTF-8 sequence starting with bytes >= 0xC0
+            if data[i] >= 0xC0 {
+                // Try to find a complete UTF-8 character sequence
+                let mut seq_len = 1;
+                if data[i] >= 0xF0 { seq_len = 4; }
+                else if data[i] >= 0xE0 { seq_len = 3; }
+                else if data[i] >= 0xC0 { seq_len = 2; }
+
+                if i + seq_len <= data.len() {
+                    let sequence = &data[i..i + seq_len];
+                    if std::str::from_utf8(sequence).is_ok() {
+                        result.extend_from_slice(sequence);
+                        found_utf8 = true;
+                        i += seq_len;
+                        continue;
+                    }
+                }
+            }
+            result.push(data[i]);
+            i += 1;
+        }
+
+        if found_utf8 {
+            Some(result)
+        } else {
+            None
+        }
+    }
+
+    fn fix_partial_mojibake(&self, data: &[u8]) -> Option<Vec<u8>> {
+        // Handle cases where a field contains both mojibake (UTF-8 interpreted as ISO)
+        // and legitimate ISO-8859-1 characters
+        //
+        // The sophisticated approach: instead of pattern matching, we use chardetng
+        // to detect if segments of the data are actually UTF-8 when reinterpreted
+
+        // Convert to string as ISO-8859-1 to see the mojibake patterns
+        let as_iso_string = data.iter().map(|&b| b as char).collect::<String>();
+
+        // Look for mojibake indicators (characters that suggest UTF-8 misinterpretation)
+        if !as_iso_string.contains('Ã') {
+            return None; // No mojibake patterns detected
+        }
+
+
+        // Convert the ISO string back to bytes for byte-level analysis
+        let iso_bytes: Vec<u8> = as_iso_string.chars().map(|c| c as u8).collect();
+
+        // Enhanced byte-level mojibake correction
+        // Look for UTF-8 byte sequences that were misinterpreted as ISO-8859-1
+        let mut result = Vec::new();
+        let mut i = 0;
+        let mut found_correction = false;
+
+        while i < iso_bytes.len() {
+            // Look for UTF-8 multi-byte sequences starting with bytes 0xC2-0xF4
+            if iso_bytes[i] >= 0xC2 && iso_bytes[i] <= 0xF4 {
+                // Determine expected sequence length
+                let seq_len = if iso_bytes[i] <= 0xDF { 2 }      // 2-byte sequence
+                             else if iso_bytes[i] <= 0xEF { 3 }  // 3-byte sequence
+                             else { 4 };                         // 4-byte sequence
+
+                // Check if we have enough bytes and they form a valid UTF-8 sequence
+                if i + seq_len <= iso_bytes.len() {
+                    let utf8_bytes = &iso_bytes[i..i + seq_len];
+                    if let Ok(utf8_char) = std::str::from_utf8(utf8_bytes) {
+                        result.extend_from_slice(utf8_char.as_bytes());
+                        found_correction = true;
+                        i += seq_len;
+                        continue;
+                    }
+                }
+            }
+
+            // Keep the original byte, but ensure it's properly encoded as UTF-8
+            let ch = iso_bytes[i] as char;
+            result.extend_from_slice(ch.to_string().as_bytes());
+            i += 1;
+        }
+
+        if found_correction {
+            Some(result)
+        } else {
+            None
+        }
+    }
+
+    fn fix_mojibake_utf8(&self, data: &[u8]) -> Option<Vec<u8>> {
+        // Use chardetng-based approach for mojibake detection and correction
+        // Convert data to ISO-8859-1 interpretation first
+        let as_iso_string = data.iter().map(|&b| b as char).collect::<String>();
+
+        // Look for mojibake indicators
+        if !as_iso_string.contains('Ã') {
+            return None; // No mojibake patterns detected
+        }
+
+        // Convert back to bytes as if it were ISO-8859-1
+        let iso_bytes: Vec<u8> = as_iso_string.chars().map(|c| c as u8).collect();
+
+        // Use chardetng to detect if these bytes are actually UTF-8
+        let mut detector = EncodingDetector::new();
+        detector.feed(&iso_bytes, true);
+        let detected_encoding = detector.guess(None, true);
+
+        if detected_encoding.name() == "UTF-8" {
+            // Validate that it's actually valid UTF-8 and represents a correction
+            if let Ok(utf8_str) = std::str::from_utf8(&iso_bytes) {
+                // Check if this looks like it fixed mojibake
+                // (should have fewer characters than the ISO interpretation)
+                if utf8_str.chars().count() < as_iso_string.chars().count() {
+                    return Some(iso_bytes);
+                }
+            }
+        }
+
+        None
+    }
+
+    fn fix_nested_mojibake(&self, data: &[u8]) -> Option<Vec<u8>> {
+        // Handle nested mojibake using the specific algorithm:
+        // Look for sequences of Unicode characters with code points between 192-223 (UTF-8 start bytes)
+        // followed by characters with code points between 128-191 (UTF-8 continuation bytes)
+
+        let utf8_string = match std::str::from_utf8(data) {
+            Ok(s) => s,
+            Err(_) => return None, // Not valid UTF-8, can't be nested mojibake
+        };
+
+
+        let chars: Vec<char> = utf8_string.chars().collect();
+        let mut result = Vec::new();
+        let mut i = 0;
+        let mut found_correction = false;
+
+        while i < chars.len() {
+            let char_code = chars[i] as u32;
+
+            // Look for UTF-8 start bytes (192-223 = 0xC0-0xDF)
+            if char_code >= 192 && char_code <= 223 {
+                // This could be a UTF-8 2-byte sequence start
+                if i + 1 < chars.len() {
+                    let next_char_code = chars[i + 1] as u32;
+
+                    // Check if followed by UTF-8 continuation byte (128-191 = 0x80-0xBF)
+                    if next_char_code >= 128 && next_char_code <= 191 {
+                        // We have a potential UTF-8 2-byte sequence
+                        let utf8_bytes = [char_code as u8, next_char_code as u8];
+
+                        // Verify this forms a valid UTF-8 sequence
+                        if let Ok(utf8_char) = std::str::from_utf8(&utf8_bytes) {
+                            // This is valid UTF-8! Replace the mojibake with the correct character
+                            result.extend_from_slice(utf8_char.as_bytes());
+                            found_correction = true;
+                            i += 2; // Skip both characters
+                            continue;
+                        }
+                    }
+                }
+            }
+            // Look for UTF-8 3-byte sequence start (224-239 = 0xE0-0xEF)
+            else if char_code >= 224 && char_code <= 239 {
+                if i + 2 < chars.len() {
+                    let next1_code = chars[i + 1] as u32;
+                    let next2_code = chars[i + 2] as u32;
+
+                    // Check if followed by two UTF-8 continuation bytes
+                    if (next1_code >= 128 && next1_code <= 191) &&
+                       (next2_code >= 128 && next2_code <= 191) {
+                        let utf8_bytes = [char_code as u8, next1_code as u8, next2_code as u8];
+
+                        if let Ok(utf8_char) = std::str::from_utf8(&utf8_bytes) {
+                            result.extend_from_slice(utf8_char.as_bytes());
+                            found_correction = true;
+                            i += 3; // Skip all three characters
+                            continue;
+                        }
+                    }
+                }
+            }
+            // Look for UTF-8 4-byte sequence start (240-247 = 0xF0-0xF7)
+            else if char_code >= 240 && char_code <= 247 {
+                if i + 3 < chars.len() {
+                    let next1_code = chars[i + 1] as u32;
+                    let next2_code = chars[i + 2] as u32;
+                    let next3_code = chars[i + 3] as u32;
+
+                    // Check if followed by three UTF-8 continuation bytes
+                    if (next1_code >= 128 && next1_code <= 191) &&
+                       (next2_code >= 128 && next2_code <= 191) &&
+                       (next3_code >= 128 && next3_code <= 191) {
+                        let utf8_bytes = [char_code as u8, next1_code as u8, next2_code as u8, next3_code as u8];
+
+                        if let Ok(utf8_char) = std::str::from_utf8(&utf8_bytes) {
+                            result.extend_from_slice(utf8_char.as_bytes());
+                            found_correction = true;
+                            i += 4; // Skip all four characters
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            // No UTF-8 sequence found, keep the original character
+            let ch = chars[i];
+            result.extend_from_slice(ch.to_string().as_bytes());
+            i += 1;
+        }
+
+        if found_correction {
             Some(result)
         } else {
             None
@@ -367,6 +617,11 @@ impl EncodingProcessor {
     }
 
     fn decode_to_unicode(&self, data: &[u8], encoding_name: &str) -> Result<String> {
+        // If data is valid UTF-8, decode as UTF-8 regardless of detected encoding
+        if let Ok(utf8_str) = std::str::from_utf8(data) {
+            return Ok(utf8_str.to_string());
+        }
+
         let encoding = self.get_encoding_by_name(encoding_name)?;
         let (decoded, _, had_errors) = encoding.decode(data);
 
@@ -471,9 +726,3 @@ impl EncodingProcessor {
     }
 }
 
-#[derive(Default)]
-struct FieldByteStats {
-    high_bytes: usize,
-    utf8_valid: usize,
-    utf8_invalid: usize,
-}

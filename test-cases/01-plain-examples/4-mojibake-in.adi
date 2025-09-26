@@ -1,0 +1,25 @@
+File with both ISO characters and UTF-8 characters. Field counts in bytes.
+
+This is a common "mojibake" scenario where an app that uses ISO internally
+has received UTF-8 byte streams.
+
+It even includes a single field with both ISO and UTF-8 characters.
+
+Command: `transadif {filename}`
+
+Output should be transcoded to Unicode and correct field counts in characters.
+
+<programid:9>TransADIF
+<eoh>
+<band:3>40m
+<call:5>K1MIX
+<freq:5>7.200
+<mode:3>SSB
+<name:16>Juán Muñoz UTF
+<qth:12>El Ca�on ISO
+<address:30>Juán Muñoz en El Ca�on MIXED
+<qso_date:8>20250901
+<time_on:4>0400
+<notes:43>Mixed ISO and UTF-8, field counts in bytes
+<comment:43>Mixed ISO and UTF-8, field counts in bytes
+<eor>

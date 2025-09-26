@@ -1,0 +1,27 @@
+File with both ISO characters and UTF-8 characters. Field counts in bytes.
+
+This is a less common "mojibake" scenario where data has been
+reinterpreted from UTF-8 to ISO-8859-1 then converted to UTF-8
+and reinterpreted again.
+
+It even includes a single field with both ISO and UTF-8 characters.
+
+Command: `transadif {filename}`
+
+Output should be transcoded to Unicode and correct field counts in characters.
+
+<programid:9>TransADIF
+<encoding:5>UTF-8
+<eoh>
+<band:3>40m
+<call:5>K1MIX
+<freq:5>7.200
+<mode:3>SSB
+<name:14>Juán Muñoz UTF
+<qth:12>El Cañon ISO
+<address:28>Juán Muñoz en El Cañon MIXED
+<qso_date:8>20250901
+<time_on:4>0500
+<notes:60>Mixed ISO and UTF-8, nested mojibake, field counts in bytes
+<comment:60>Mixed ISO and UTF-8, nested mojibake,field counts in bytes
+<eor>
