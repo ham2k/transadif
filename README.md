@@ -4,6 +4,9 @@ A command-line tool for dealing with transcoding and correcting text encoding is
 
 Created by Sebastian Delmont <ki2d@ham2k.net> - [Ham2K Technologies](https://ham2k.net)
 
+# 🚧 This is still awork in progress. 🚧
+
+Not all the features described below are implemented yet.
 ## Overview
 
 TransADIF is a Rust-based tool designed to process [ADIF (Amateur Data Interchange Format)](https://www.adif.org/) files with intelligent encoding detection and correction. It handles various text encoding scenarios commonly encountered in amateur radio logging files, ensuring proper Unicode representation regardless of the original encoding.
