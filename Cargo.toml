@@ -2,8 +2,8 @@
 name = "transadif"
 version = "0.1.0"
 edition = "2021"
-description = "A command-line tool for processing ADIF files with proper encoding handling"
-authors = ["Ham2K"]
+description = "A command-line tool for dealing with text encoding issues in ADIF files"
+authors = ["Sebastian Delmont KI2D <ki2d@ham2k.net> - Ham2K Technologies"]
 license = "MIT"
 
 [[bin]]
