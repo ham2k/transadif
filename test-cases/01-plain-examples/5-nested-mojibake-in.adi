@@ -4,6 +4,8 @@ This is a less common "mojibake" scenario where data has been
 reinterpreted from UTF-8 to ISO-8859-1 then converted to UTF-8
 and reinterpreted again.
 
+It even includes a single field with both ISO and UTF-8 characters.
+
 Command: `transadif {filename}`
 
 Output should be transcoded to Unicode and correct field counts in characters.
