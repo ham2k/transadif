@@ -115,20 +115,7 @@ fn run_single_test(input_file: &Path, expected_output: &Path) -> Result<bool, Bo
     // TODO: Implement more sophisticated comparison that ignores preamble differences
     let matches = actual_output == expected_bytes;
     if !matches {
-        eprintln!("Output mismatch for {}", input_file.display());
-        eprintln!("Actual length: {}, Expected length: {}", actual_output.len(), expected_bytes.len());
-        if actual_output.len() != expected_bytes.len() {
-            eprintln!("Length difference detected");
-        } else {
-            // Find first difference
-            for (i, (a, e)) in actual_output.iter().zip(expected_bytes.iter()).enumerate() {
-                if a != e {
-                    eprintln!("First difference at position {}: got {} ({}), expected {} ({})",
-                             i, a, *a as char, e, *e as char);
-                    break;
-                }
-            }
-        }
+        print_detailed_diff(input_file, &actual_output, &expected_bytes);
     }
     Ok(matches)
 }
@@ -188,4 +175,152 @@ fn execute_with_timeout(command: &str, _timeout_secs: u64) -> Result<std::proces
     let output = cmd.output()?;
 
     Ok(output)
+}
+
+fn print_detailed_diff(input_file: &Path, actual: &[u8], expected: &[u8]) {
+    eprintln!("Output mismatch for {}", input_file.display());
+    eprintln!("Actual length: {}, Expected length: {}", actual.len(), expected.len());
+
+    if actual.len() != expected.len() {
+        eprintln!("Length difference: {} bytes", (actual.len() as i64) - (expected.len() as i64));
+    }
+
+    // Find all differences
+    let mut differences = Vec::new();
+    let max_len = actual.len().max(expected.len());
+
+    for i in 0..max_len {
+        let actual_byte = actual.get(i).copied();
+        let expected_byte = expected.get(i).copied();
+
+        if actual_byte != expected_byte {
+            differences.push(i);
+        }
+    }
+
+    if differences.is_empty() {
+        eprintln!("No byte differences found (this shouldn't happen!)");
+        return;
+    }
+
+    eprintln!("Found {} byte difference(s)", differences.len());
+
+    // Show first few differences with context
+    let max_diffs_to_show = 5;
+    for (diff_idx, &pos) in differences.iter().take(max_diffs_to_show).enumerate() {
+        eprintln!();
+        eprintln!("=== Difference {} at position {} ===", diff_idx + 1, pos);
+
+        let actual_byte = actual.get(pos).copied();
+        let expected_byte = expected.get(pos).copied();
+
+        match (actual_byte, expected_byte) {
+            (Some(a), Some(e)) => {
+                eprintln!("  Actual:   0x{:02x} ({}) '{}'", a, a, format_byte_as_char(a));
+                eprintln!("  Expected: 0x{:02x} ({}) '{}'", e, e, format_byte_as_char(e));
+            },
+            (Some(a), None) => {
+                eprintln!("  Actual:   0x{:02x} ({}) '{}' (extra byte)", a, a, format_byte_as_char(a));
+                eprintln!("  Expected: <end of file>");
+            },
+            (None, Some(e)) => {
+                eprintln!("  Actual:   <end of file>");
+                eprintln!("  Expected: 0x{:02x} ({}) '{}' (missing byte)", e, e, format_byte_as_char(e));
+            },
+            (None, None) => unreachable!(),
+        }
+
+        // Show context around the difference
+        let context_size = 20;
+        let start = pos.saturating_sub(context_size);
+        let end = (pos + context_size + 1).min(max_len);
+
+        eprintln!("  Context (±{} bytes):", context_size);
+        print_hex_context(actual, expected, start, end, pos);
+        print_text_context(actual, expected, start, end, pos);
+    }
+
+    if differences.len() > max_diffs_to_show {
+        eprintln!();
+        eprintln!("... and {} more differences", differences.len() - max_diffs_to_show);
+    }
+}
+
+fn format_byte_as_char(byte: u8) -> String {
+    match byte {
+        b'\n' => "\\n".to_string(),
+        b'\r' => "\\r".to_string(),
+        b'\t' => "\\t".to_string(),
+        b'\\' => "\\\\".to_string(),
+        0x20..=0x7E => (byte as char).to_string(), // Printable ASCII
+        _ => format!("\\x{:02x}", byte),
+    }
+}
+
+fn print_hex_context(actual: &[u8], expected: &[u8], start: usize, end: usize, diff_pos: usize) {
+    eprintln!("    Hex context:");
+
+    // Actual bytes
+    eprint!("    Actual:   ");
+    for i in start..end {
+        if i == diff_pos {
+            eprint!("[{:02x}] ", actual.get(i).copied().unwrap_or(0));
+        } else if let Some(byte) = actual.get(i) {
+            eprint!("{:02x} ", byte);
+        } else {
+            eprint!("-- ");
+        }
+    }
+    eprintln!();
+
+    // Expected bytes
+    eprint!("    Expected: ");
+    for i in start..end {
+        if i == diff_pos {
+            eprint!("[{:02x}] ", expected.get(i).copied().unwrap_or(0));
+        } else if let Some(byte) = expected.get(i) {
+            eprint!("{:02x} ", byte);
+        } else {
+            eprint!("-- ");
+        }
+    }
+    eprintln!();
+}
+
+fn print_text_context(actual: &[u8], expected: &[u8], start: usize, end: usize, diff_pos: usize) {
+    eprintln!("    Text context:");
+
+    // Actual text
+    eprint!("    Actual:   \"");
+    for i in start..end {
+        if let Some(byte) = actual.get(i) {
+            if i == diff_pos {
+                eprint!("[{}]", format_byte_as_char(*byte));
+            } else {
+                eprint!("{}", format_byte_as_char(*byte));
+            }
+        } else {
+            if i == diff_pos {
+                eprint!("[EOF]");
+            }
+        }
+    }
+    eprintln!("\"");
+
+    // Expected text
+    eprint!("    Expected: \"");
+    for i in start..end {
+        if let Some(byte) = expected.get(i) {
+            if i == diff_pos {
+                eprint!("[{}]", format_byte_as_char(*byte));
+            } else {
+                eprint!("{}", format_byte_as_char(*byte));
+            }
+        } else {
+            if i == diff_pos {
+                eprint!("[EOF]");
+            }
+        }
+    }
+    eprintln!("\"");
 }

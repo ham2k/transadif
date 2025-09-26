@@ -23,6 +23,7 @@ pub struct Config {
     pub delete_incompatible: bool,
     pub ascii_transliterate: bool,
     pub strict_mode: bool,
+    pub debug_qsos: Option<Vec<String>>,
 }
 
 impl Default for Config {
@@ -37,6 +38,7 @@ impl Default for Config {
             delete_incompatible: false,
             ascii_transliterate: false,
             strict_mode: false,
+            debug_qsos: None,
         }
     }
 }
@@ -90,7 +92,6 @@ fn main() -> Result<(), TransadifError> {
         )
         .arg(
             Arg::new("delete")
-                .short('d')
                 .long("delete")
                 .help("Delete incompatible characters")
                 .action(ArgAction::SetTrue)
@@ -109,6 +110,14 @@ fn main() -> Result<(), TransadifError> {
                 .help("Strict mode - report errors instead of correcting")
                 .action(ArgAction::SetTrue)
         )
+        .arg(
+            Arg::new("debug")
+                .short('d')
+                .long("debug")
+                .value_name("QSO_NUMBERS")
+                .help("Debug mode - print detailed information for specified QSOs (comma-separated, e.g., 1,3,5)")
+                .action(ArgAction::Set)
+        )
         .get_matches();
 
     let config = Config {
@@ -126,6 +135,8 @@ fn main() -> Result<(), TransadifError> {
         delete_incompatible: matches.get_flag("delete"),
         ascii_transliterate: matches.get_flag("ascii"),
         strict_mode: matches.get_flag("strict"),
+        debug_qsos: matches.get_one::<String>("debug")
+            .map(|s| s.split(',').map(|s| s.trim().to_string()).collect()),
     };
 
     process_adif_file(config)
@@ -157,6 +168,11 @@ fn process_adif_file(config: Config) -> Result<(), TransadifError> {
     // Process and convert encodings
     adif_file.process_encodings(&config)?;
 
+    // Debug output if requested
+    if let Some(ref debug_qsos) = config.debug_qsos {
+        print_debug_info(&adif_file, debug_qsos);
+    }
+
     // Generate output
     let output_bytes = adif_file.generate_output(&config)?;
 
@@ -168,4 +184,76 @@ fn process_adif_file(config: Config) -> Result<(), TransadifError> {
     }
 
     Ok(())
+}
+
+fn print_debug_info(adif_file: &adif::AdifFile, debug_qsos: &[String]) {
+    eprintln!("=== DEBUG MODE ===");
+
+    // Parse QSO numbers (support both numbers and "all")
+    let mut qso_numbers = Vec::new();
+    for qso_spec in debug_qsos {
+        if qso_spec.to_lowercase() == "all" {
+            // Debug all QSOs
+            for i in 1..=adif_file.records.len() {
+                qso_numbers.push(i);
+            }
+            break;
+        } else if let Ok(num) = qso_spec.parse::<usize>() {
+            qso_numbers.push(num);
+        } else {
+            eprintln!("Warning: Invalid QSO number '{}'", qso_spec);
+        }
+    }
+
+    eprintln!("Total QSOs in file: {}", adif_file.records.len());
+    eprintln!("Debugging QSOs: {:?}", qso_numbers);
+    eprintln!();
+
+    for qso_num in qso_numbers {
+        if qso_num == 0 || qso_num > adif_file.records.len() {
+            eprintln!("Warning: QSO {} does not exist (valid range: 1-{})", qso_num, adif_file.records.len());
+            continue;
+        }
+
+        let record = &adif_file.records[qso_num - 1];
+        eprintln!("=== QSO {} ===", qso_num);
+        eprintln!("Fields: {}", record.fields.len());
+
+        for (field_idx, field) in record.fields.iter().enumerate() {
+            eprintln!("  Field {}: {}", field_idx + 1, field.name.to_uppercase());
+
+            // Show original data info
+            if !field.raw_data.is_empty() {
+                eprintln!("    Original bytes: {} bytes", field.raw_data.len());
+                eprintln!("    Original hex: {}", hex_preview(&field.raw_data));
+            }
+
+            // Show interpreted data
+            eprintln!("    Interpreted data: {:?}", field.data);
+            eprintln!("    Character count: {}", field.data.chars().count());
+            eprintln!("    Byte count (UTF-8): {}", field.data.as_bytes().len());
+
+            // Show excess data if any
+            if !field.excess_data.is_empty() {
+                eprintln!("    Excess data: {:?}", field.excess_data);
+            }
+
+            eprintln!();
+        }
+
+        if !record.excess_data.is_empty() {
+            eprintln!("  Record excess data: {:?}", record.excess_data);
+        }
+
+        eprintln!();
+    }
+}
+
+fn hex_preview(bytes: &[u8]) -> String {
+    if bytes.len() <= 32 {
+        bytes.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ")
+    } else {
+        let preview = bytes[..16].iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+        format!("{} ... ({} more bytes)", preview, bytes.len() - 16)
+    }
 }

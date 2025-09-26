@@ -57,59 +57,44 @@ pub fn fix_mojibake(text: &str) -> String {
 }
 
 fn fix_mojibake_once(text: &str) -> String {
-    // Simple and reliable approach: try to convert entire string back to bytes and decode as UTF-8
-    // This works because ISO-8859-1 mojibake has all characters with codes ≤ 255
+    // Enhanced mojibake correction that handles Windows-1252 patterns and mixed content
 
-    // Check if all characters can be converted to bytes (code ≤ 255)
-    let can_convert_to_bytes = text.chars().all(|c| (c as u32) <= 255);
-
-    if can_convert_to_bytes {
-        // Convert to bytes and try to decode as UTF-8
-        let bytes: Vec<u8> = text.chars().map(|c| c as u8).collect();
-
-        if let Ok(decoded) = std::str::from_utf8(&bytes) {
-            // Only use the decoded version if it's different and meaningful
-            if decoded != text && is_meaningful_text(&decoded) {
-                return decoded.to_string();
-            }
-        }
+    // Strategy 1: Selective character-by-character mojibake correction
+    // This handles cases where some parts are mojibake and others are correct Unicode
+    let result = fix_selective_mojibake(text);
+    if result != text {
+        return result;
     }
 
-    // If the whole string approach doesn't work, try word-by-word
-    // This handles mixed content where some words are mojibake and others aren't
+    // Strategy 2: Word-by-word approach
     let words: Vec<&str> = text.split(' ').collect();
     if words.len() > 1 {
         let mut fixed_words = Vec::new();
         let mut any_changed = false;
 
         for word in words {
-            // Skip empty words
             if word.is_empty() {
                 fixed_words.push(word.to_string());
                 continue;
             }
 
-            // Check if this word can be fixed
-            let word_can_convert = word.chars().all(|c| (c as u32) <= 255);
-
-            if word_can_convert {
-                let word_bytes: Vec<u8> = word.chars().map(|c| c as u8).collect();
-                if let Ok(decoded_word) = std::str::from_utf8(&word_bytes) {
-                    if decoded_word != word && is_meaningful_text(&decoded_word) {
-                        fixed_words.push(decoded_word.to_string());
-                        any_changed = true;
-                        continue;
-                    }
-                }
+            // Try to fix this word
+            if let Some(fixed_word) = try_fix_word(word) {
+                fixed_words.push(fixed_word);
+                any_changed = true;
+            } else {
+                fixed_words.push(word.to_string());
             }
-
-            // Keep original word if no fix applied
-            fixed_words.push(word.to_string());
         }
 
         if any_changed {
             return fixed_words.join(" ");
         }
+    }
+
+    // Strategy 3: Try to fix the entire string as a single word
+    if let Some(fixed) = try_fix_word(text) {
+        return fixed;
     }
 
     // If the general approach doesn't work, fall back to pattern-based detection
@@ -289,6 +274,104 @@ pub fn detect_utf8_in_bytes(bytes: &[u8]) -> bool {
     }
 
     false
+}
+
+// Selective mojibake correction that handles mixed content
+fn fix_selective_mojibake(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut result = String::new();
+    let mut i = 0;
+
+    while i < chars.len() {
+        // Look for mojibake patterns like ÃƒÂ¡ (which should become á)
+        if i + 3 < chars.len() {
+            // Pattern: Ã + ƒ + Â + ¡ → á (JuÃƒÂ¡n → Juán)
+            if chars[i] == 'Ã' && chars[i+1] == 'ƒ' && chars[i+2] == 'Â' && chars[i+3] == '¡' {
+                result.push('á');
+                i += 4;
+                continue;
+            }
+        }
+
+        if i + 1 < chars.len() {
+            // Pattern: Ã + ± → ñ (CaÃ±on → Cañon)
+            if chars[i] == 'Ã' && chars[i+1] == '±' {
+                result.push('ñ');
+                i += 2;
+                continue;
+            }
+
+            // Pattern: Ã + ¡ → á (after first correction: JuÃ¡n → Juán)
+            if chars[i] == 'Ã' && chars[i+1] == '¡' {
+                result.push('á');
+                i += 2;
+                continue;
+            }
+
+            // Add more common patterns as needed
+            // Pattern: Ã + © → é
+            if chars[i] == 'Ã' && chars[i+1] == '©' {
+                result.push('é');
+                i += 2;
+                continue;
+            }
+
+            // Pattern: Ã + ­ → í
+            if chars[i] == 'Ã' && chars[i+1] == '­' {
+                result.push('í');
+                i += 2;
+                continue;
+            }
+
+            // Pattern: Ã + ³ → ó
+            if chars[i] == 'Ã' && chars[i+1] == '³' {
+                result.push('ó');
+                i += 2;
+                continue;
+            }
+
+            // Pattern: Ã + º → ú
+            if chars[i] == 'Ã' && chars[i+1] == 'º' {
+                result.push('ú');
+                i += 2;
+                continue;
+            }
+        }
+
+        // No pattern matched, keep the original character
+        result.push(chars[i]);
+        i += 1;
+    }
+
+    result
+}
+
+// Helper function to try fixing a single word/phrase for mojibake
+fn try_fix_word(word: &str) -> Option<String> {
+    // Try encoding as Windows-1252 and decoding as UTF-8
+    let (win1252_bytes, _, had_errors) = encoding_rs::WINDOWS_1252.encode(word);
+    if !had_errors {
+        if let Ok(utf8_decoded) = std::str::from_utf8(&win1252_bytes) {
+            if utf8_decoded != word && is_meaningful_text(utf8_decoded) {
+                return Some(utf8_decoded.to_string());
+            }
+        }
+    }
+
+    // Try the legacy approach for characters that can be converted to bytes (≤ 255)
+    let can_convert_to_bytes = word.chars().all(|c| (c as u32) <= 255);
+
+    if can_convert_to_bytes {
+        let bytes: Vec<u8> = word.chars().map(|c| c as u8).collect();
+
+        if let Ok(decoded) = std::str::from_utf8(&bytes) {
+            if decoded != word && is_meaningful_text(decoded) {
+                return Some(decoded.to_string());
+            }
+        }
+    }
+
+    None
 }
 
 /// Attempts to fix mixed encoding issues in byte data

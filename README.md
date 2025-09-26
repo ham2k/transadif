@@ -93,7 +93,37 @@ transadif input.adi -o output.adi
 
 # Process from stdin
 cat input.adi | transadif > output.adi
+
+# Debug mode - show detailed field information
+transadif input.adi --debug 1,3,5
+transadif input.adi --debug all
 ```
+
+### Debug Mode
+
+The `--debug` option provides detailed information about QSO records and their fields:
+
+```bash
+# Debug specific QSOs (comma-separated)
+transadif mylog.adi --debug 1,3,5
+
+# Debug all QSOs in the file
+transadif mylog.adi --debug all
+```
+
+Debug output shows:
+- **Original bytes**: Raw field data as stored in the file
+- **Hex representation**: Hexadecimal view of the original bytes
+- **Interpreted data**: Unicode string after encoding detection and mojibake correction
+- **Character count**: Number of Unicode characters
+- **Byte count**: Number of UTF-8 bytes in the final string
+- **Excess data**: Any data found after the field
+
+This is particularly useful for:
+- Diagnosing encoding issues
+- Understanding mojibake corrections
+- Troubleshooting field parsing problems
+- Analyzing character count discrepancies
 
 ### Command Line Options
 
@@ -108,9 +138,10 @@ OPTIONS:
     -e, --encoding <encoding>           Output encoding [default: UTF-8]
     -t, --transcode                     Transcode compatible characters
     -r, --replace <character>           Replace incompatible chars [default: ?]
-    -d, --delete                        Delete incompatible characters
+        --delete                        Delete incompatible characters
     -a, --ascii                         Transliterate to ASCII without diacritics
     -s, --strict                        Strict mode - no automatic corrections
+    -d, --debug <qso-numbers>           Debug mode - show detailed field info
 ```
 
 ### Supported Encodings
