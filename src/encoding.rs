@@ -1,7 +1,6 @@
 use crate::error::{Result, TransadifError};
 use crate::adif::{AdifFile, AdifField};
 use encoding_rs::{Encoding, UTF_8, WINDOWS_1252};
-use regex::Regex;
 use unidecode::unidecode;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -395,44 +394,15 @@ impl EncodingProcessor {
     }
 
     fn replace_entity_references(&self, text: &str) -> Result<String> {
-        let entity_regex = Regex::new(r"&(#?)([0-9A-Fa-fx]+);").unwrap();
-        let mut result = text.to_string();
-
-        for captures in entity_regex.captures_iter(text) {
-            let full_match = captures.get(0).unwrap().as_str();
-            let is_numeric = captures.get(1).unwrap().as_str() == "#";
-            let value_str = captures.get(2).unwrap().as_str();
-
-            if is_numeric {
-                // Numeric entity reference
-                let code_point = if value_str.to_lowercase().starts_with("x") {
-                    // Hexadecimal
-                    u32::from_str_radix(&value_str[1..], 16)
-                } else {
-                    // Decimal
-                    value_str.parse::<u32>()
-                };
-
-                if let Ok(code) = code_point {
-                    if let Some(ch) = char::from_u32(code) {
-                        result = result.replace(full_match, &ch.to_string());
-                    }
-                }
-            } else {
-                // Named entity reference - implement basic HTML entities
-                let replacement = match value_str.to_lowercase().as_str() {
-                    "amp" => "&",
-                    "lt" => "<",
-                    "gt" => ">",
-                    "quot" => "\"",
-                    "apos" => "'",
-                    _ => continue,
-                };
-                result = result.replace(full_match, replacement);
+        // Use the htmlescape crate for comprehensive entity handling
+        match htmlescape::decode_html(text) {
+            Ok(decoded) => Ok(decoded.to_string()),
+            Err(_) => {
+                // If htmlescape fails, return the original text
+                // This is more robust than failing completely
+                Ok(text.to_string())
             }
         }
-
-        Ok(result)
     }
 
     pub fn encode_for_output(&self, text: &str) -> Result<(Vec<u8>, usize)> {
