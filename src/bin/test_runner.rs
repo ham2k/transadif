@@ -7,8 +7,9 @@ use clap::{Arg, Command as ClapCommand};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let matches = ClapCommand::new("test_runner")
-        .version("0.1.0")
+        .version(env!("CARGO_PKG_VERSION"))
         .about("Test runner for TransADIF")
+        .long_about("TransADIF Test Runner - Validates TransADIF functionality against test cases.\n\nRuns all test cases in the test-cases directory and compares outputs.")
         .arg(
             Arg::new("filter")
                 .help("Filter tests by filename or directory")

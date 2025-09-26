@@ -43,8 +43,9 @@ impl Default for Config {
 
 fn main() -> Result<(), TransadifError> {
     let matches = Command::new("transadif")
-        .version("0.1.0")
+        .version(env!("CARGO_PKG_VERSION"))
         .about("Process ADIF files with proper encoding handling")
+        .long_about("TransADIF - A command-line tool for processing ADIF files with intelligent encoding detection and correction.\n\nSupports automatic mojibake correction, field count reinterpretation, and multiple output encodings.")
         .arg(
             Arg::new("input")
                 .help("Input ADIF file (reads from stdin if not specified)")

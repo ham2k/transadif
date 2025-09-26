@@ -391,19 +391,34 @@ impl<'a> AdifParser<'a> {
         let bytes_end = (self.pos + expected_length).min(self.bytes.len());
         let data_bytes = &self.bytes[self.pos..bytes_end];
 
-        // Try to convert to unicode
+        // Try to convert to unicode with data correction as per GOALS.md
         let data_str = if let Ok(utf8_str) = std::str::from_utf8(data_bytes) {
             // It's valid UTF-8
             utf8_str.to_string()
         } else {
-            // Use detected encoding
-            convert_to_unicode(data_bytes, self.detected_encoding)?
+            // Check if this is an ASCII/8-bit file with UTF-8 sequences (per GOALS.md line 68)
+            // "If a file is specified as encoded in ASCII or an 8-bit code page, and a field's data
+            // contains sequences of two or more consecutive bytes above 127, and these bytes are
+            // valid UTF-8 sequences, then the data should be reinterpreted as UTF-8"
+            if self.detected_encoding != encoding_rs::UTF_8 && has_utf8_sequences(data_bytes) {
+                // Try to reinterpret as UTF-8
+                if let Ok(utf8_reinterpreted) = std::str::from_utf8(data_bytes) {
+                    utf8_reinterpreted.to_string()
+                } else {
+                    // Fall back to detected encoding
+                    convert_to_unicode(data_bytes, self.detected_encoding)?
+                }
+            } else {
+                // Use detected encoding
+                convert_to_unicode(data_bytes, self.detected_encoding)?
+            }
         };
 
         // Check if we need to reinterpret the length (bytes vs characters)
         // This implements the heuristic from GOALS.md about field count mismatches
-        if !self.config.strict_mode && std::str::from_utf8(data_bytes).is_ok() {
-            // The data is valid UTF-8, check if interpreting as character count makes more sense
+        if !self.config.strict_mode {
+            // Check if interpreting as character count makes more sense
+            // For UTF-8 data, we might have read bytes when we should have read characters
             let char_count = data_str.chars().count();
 
             // Look ahead to see what comes after this field
@@ -412,41 +427,57 @@ impl<'a> AdifParser<'a> {
             let lookahead_bytes = &self.bytes[lookahead_start..lookahead_end];
             let lookahead_str = std::str::from_utf8(lookahead_bytes).unwrap_or("");
 
-            // Only reinterpret if:
-            // 1. Character count is less than expected length (suggesting byte count was used for UTF-8)
-            // 2. The excess data after the field contains non-whitespace (suggesting truncation)
-            // 3. We can successfully read the expected number of characters
-            if char_count < expected_length {
-                // Check if there's non-whitespace in the excess data
-                // We need to be careful about '<' characters that might be part of the data vs actual field starts
+            // Reinterpret if we suspect byte count was used instead of character count
+            // Key indicators:
+            // 1. The data we read is invalid UTF-8 (truncated) OR has fewer characters than expected
+            // 2. There's non-whitespace excess data suggesting truncation
+            let should_reinterpret = if std::str::from_utf8(data_bytes).is_err() {
+                // Case 1: Invalid UTF-8 from reading bytes - likely truncated UTF-8
+                true
+            } else if char_count < expected_length {
+                // Case 2: Valid UTF-8 but fewer characters than expected
                 let excess_non_whitespace = lookahead_str.chars()
-                    .take_while(|&c| c != '\n' && c != '\r')  // Stop at line breaks, which typically separate fields
+                    .take_while(|&c| c != '\n' && c != '\r')
                     .any(|c| !c.is_whitespace());
+                excess_non_whitespace
+            } else {
+                false
+            };
 
-                if excess_non_whitespace {
-                    // Try to read expected_length characters instead of bytes
-                    let mut char_end = self.pos;
-                    let mut chars_read = 0;
+            if should_reinterpret {
+                // Try to read exactly expected_length characters from the byte stream
+                let mut char_end = self.pos;
+                let mut chars_read = 0;
 
-                    while char_end < self.bytes.len() && chars_read < expected_length {
-                        if let Some(ch) = std::str::from_utf8(&self.bytes[char_end..]).ok()
-                            .and_then(|s| s.chars().next()) {
-                            char_end += ch.len_utf8();
+                while char_end < self.bytes.len() && chars_read < expected_length {
+                    // Try to read the next UTF-8 character
+                    if let Ok(remaining_str) = std::str::from_utf8(&self.bytes[char_end..]) {
+                        if let Some(next_char) = remaining_str.chars().next() {
+                            char_end += next_char.len_utf8();
                             chars_read += 1;
                         } else {
                             break;
                         }
+                    } else {
+                        // If not valid UTF-8, fall back to single byte increment
+                        // This handles mojibake cases
+                        char_end += 1;
+                        chars_read += 1;
                     }
+                }
 
-                    if chars_read == expected_length {
-                        // Successfully read the expected number of characters
-                        let char_data_bytes = &self.bytes[self.pos..char_end];
-                        if let Ok(char_data_str) = std::str::from_utf8(char_data_bytes) {
-                            let original_pos = self.pos;
-                            self.pos = char_end;
-                            return Ok((char_data_str.to_string(), char_end - original_pos));
-                        }
-                    }
+                if chars_read == expected_length {
+                    // Successfully read the expected number of characters
+                    let char_data_bytes = &self.bytes[self.pos..char_end];
+                    let char_data_str = if let Ok(utf8_str) = std::str::from_utf8(char_data_bytes) {
+                        utf8_str.to_string()
+                    } else {
+                        convert_to_unicode(char_data_bytes, self.detected_encoding)?
+                    };
+
+                    let bytes_consumed = char_end - self.pos;
+                    self.pos = char_end;
+                    return Ok((char_data_str, bytes_consumed));
                 }
             }
         }
@@ -515,4 +546,37 @@ impl<'a> AdifParser<'a> {
         self.bytes[self.pos..self.pos + sequence.len()]
             .eq_ignore_ascii_case(sequence)
     }
+}
+
+// Helper function to detect UTF-8 sequences in byte data (per GOALS.md line 68)
+fn has_utf8_sequences(bytes: &[u8]) -> bool {
+    let mut i = 0;
+    let mut consecutive_high_bytes = 0;
+
+    while i < bytes.len() {
+        if bytes[i] > 127 {
+            consecutive_high_bytes += 1;
+        } else {
+            // Check if we had 2+ consecutive high bytes that form valid UTF-8
+            if consecutive_high_bytes >= 2 {
+                // Look back and see if those bytes form valid UTF-8
+                let start = i - consecutive_high_bytes;
+                if std::str::from_utf8(&bytes[start..i]).is_ok() {
+                    return true;
+                }
+            }
+            consecutive_high_bytes = 0;
+        }
+        i += 1;
+    }
+
+    // Check the final sequence if it ends with high bytes
+    if consecutive_high_bytes >= 2 {
+        let start = i - consecutive_high_bytes;
+        if std::str::from_utf8(&bytes[start..i]).is_ok() {
+            return true;
+        }
+    }
+
+    false
 }

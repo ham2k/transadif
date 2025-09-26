@@ -57,37 +57,56 @@ pub fn fix_mojibake(text: &str) -> String {
 }
 
 fn fix_mojibake_once(text: &str) -> String {
-    // First try the general approach: convert the entire string back to bytes and see if it's valid UTF-8
-    let bytes: Vec<u8> = text.chars().map(|c| c as u8).collect();
-
-    // Check if the byte sequence is valid UTF-8 but different from the original
-    if let Ok(decoded) = std::str::from_utf8(&bytes) {
-        if decoded != text && is_meaningful_text(&decoded) {
-            // This looks like mojibake that can be fixed
-            return decoded.to_string();
+    // Simple and reliable approach: try to convert entire string back to bytes and decode as UTF-8
+    // This works because ISO-8859-1 mojibake has all characters with codes ≤ 255
+    
+    // Check if all characters can be converted to bytes (code ≤ 255)
+    let can_convert_to_bytes = text.chars().all(|c| (c as u32) <= 255);
+    
+    if can_convert_to_bytes {
+        // Convert to bytes and try to decode as UTF-8
+        let bytes: Vec<u8> = text.chars().map(|c| c as u8).collect();
+        
+        if let Ok(decoded) = std::str::from_utf8(&bytes) {
+            // Only use the decoded version if it's different and meaningful
+            if decoded != text && is_meaningful_text(&decoded) {
+                return decoded.to_string();
+            }
         }
     }
-
-    // Try word-by-word approach for mixed content
+    
+    // If the whole string approach doesn't work, try word-by-word
+    // This handles mixed content where some words are mojibake and others aren't
     let words: Vec<&str> = text.split(' ').collect();
     if words.len() > 1 {
         let mut fixed_words = Vec::new();
         let mut any_changed = false;
-
+        
         for word in words {
-            let word_bytes: Vec<u8> = word.chars().map(|c| c as u8).collect();
-            if let Ok(decoded_word) = std::str::from_utf8(&word_bytes) {
-                if decoded_word != word && is_meaningful_text(&decoded_word) {
-                    fixed_words.push(decoded_word.to_string());
-                    any_changed = true;
-                } else {
-                    fixed_words.push(word.to_string());
-                }
-            } else {
+            // Skip empty words
+            if word.is_empty() {
                 fixed_words.push(word.to_string());
+                continue;
             }
+            
+            // Check if this word can be fixed
+            let word_can_convert = word.chars().all(|c| (c as u32) <= 255);
+            
+            if word_can_convert {
+                let word_bytes: Vec<u8> = word.chars().map(|c| c as u8).collect();
+                if let Ok(decoded_word) = std::str::from_utf8(&word_bytes) {
+                    if decoded_word != word && is_meaningful_text(&decoded_word) {
+                        fixed_words.push(decoded_word.to_string());
+                        any_changed = true;
+                        continue;
+                    }
+                }
+            }
+            
+            // Keep original word if no fix applied
+            fixed_words.push(word.to_string());
         }
-
+        
         if any_changed {
             return fixed_words.join(" ");
         }
