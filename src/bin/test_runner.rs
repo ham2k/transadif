@@ -113,7 +113,24 @@ fn run_single_test(input_file: &Path, expected_output: &Path) -> Result<bool, Bo
 
     // For now, do a simple byte comparison
     // TODO: Implement more sophisticated comparison that ignores preamble differences
-    Ok(actual_output == expected_bytes)
+    let matches = actual_output == expected_bytes;
+    if !matches {
+        eprintln!("Output mismatch for {}", input_file.display());
+        eprintln!("Actual length: {}, Expected length: {}", actual_output.len(), expected_bytes.len());
+        if actual_output.len() != expected_bytes.len() {
+            eprintln!("Length difference detected");
+        } else {
+            // Find first difference
+            for (i, (a, e)) in actual_output.iter().zip(expected_bytes.iter()).enumerate() {
+                if a != e {
+                    eprintln!("First difference at position {}: got {} ({}), expected {} ({})",
+                             i, a, *a as char, e, *e as char);
+                    break;
+                }
+            }
+        }
+    }
+    Ok(matches)
 }
 
 fn extract_command_from_preamble(text: &str, input_file: &Path) -> Result<String, Box<dyn std::error::Error>> {

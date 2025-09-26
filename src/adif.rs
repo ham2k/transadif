@@ -66,7 +66,7 @@ impl AdifFile {
 
         // Add encoding field if not present
         if !self.header.fields.iter().any(|f| f.name.to_lowercase() == "encoding") {
-            let encoding_field = format!("<encoding:{}>{}\n",
+            let encoding_field = format!("<encoding:{}>{}\r\n",
                 config.output_encoding.as_str().len(),
                 config.output_encoding.as_str()
             );
@@ -96,8 +96,8 @@ impl AdifFile {
 
         // Remove any duplicate <eor> tags at the end
         let output_str = String::from_utf8_lossy(&output);
-        let final_output = if output_str.ends_with("<eor>\n<eor>") {
-            output_str.strip_suffix("\n<eor>").unwrap().to_string()
+        let final_output = if output_str.ends_with("<eor>\r\n<eor>") {
+            output_str.strip_suffix("\r\n<eor>").unwrap().to_string()
         } else {
             output_str.to_string()
         };
