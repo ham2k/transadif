@@ -23,17 +23,62 @@ TransADIF is a Rust-based tool designed to process [ADIF (Amateur Data Interchan
 
 ## Installation
 
+### Pre-built Binaries
+
+Download the latest release for your platform from the [releases page](https://github.com/ham2k/transadif/releases).
+
 ### From Source
 
 ```bash
 git clone https://github.com/ham2k/transadif.git
 cd transadif
+make build
+```
+
+Or using cargo directly:
+```bash
 cargo build --release
 ```
 
 The compiled binaries will be available in `target/release/`:
 - `transadif` - Main processing tool
 - `test_runner` - Test validation tool
+
+### Building for Distribution
+
+#### Quick Local Build
+```bash
+# Build optimized binaries for current platform
+make build
+
+# Or use the script directly
+./build-local.sh
+```
+
+#### Cross-Platform Distribution
+```bash
+# Build for all supported platforms
+make dist
+
+# Or use the script directly
+./build-dist.sh
+```
+
+This creates distributable archives in the `dist/` directory for:
+- Linux (x86_64, aarch64)
+- macOS (x86_64, aarch64)
+- Windows (x86_64)
+
+#### Build Profiles
+- `--release`: Standard optimized build
+- `--profile dist`: Size-optimized build for distribution
+
+#### Requirements for Cross-Compilation
+- **Windows**: Install mingw-w64
+  - macOS: `brew install mingw-w64`
+  - Linux: `apt install gcc-mingw-w64`
+- **Linux ARM**: Install cross-compilation tools
+  - `apt install gcc-aarch64-linux-gnu`
 
 ## Usage
 
