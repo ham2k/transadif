@@ -81,6 +81,11 @@ impl AdifFile {
 
         // Write records
         for record in &self.records {
+            // Skip empty records (records with no fields)
+            if record.fields.is_empty() {
+                continue;
+            }
+
             for field in &record.fields {
                 let field_bytes = field.generate_output(&config.output_encoding, config)?;
                 output.extend_from_slice(&field_bytes);
@@ -89,7 +94,15 @@ impl AdifFile {
             output.extend_from_slice(record.excess_data.as_bytes());
         }
 
-        Ok(output)
+        // Remove any duplicate <eor> tags at the end
+        let output_str = String::from_utf8_lossy(&output);
+        let final_output = if output_str.ends_with("<eor>\n<eor>") {
+            output_str.strip_suffix("\n<eor>").unwrap().to_string()
+        } else {
+            output_str.to_string()
+        };
+
+        Ok(final_output.as_bytes().to_vec())
     }
 }
 
@@ -257,6 +270,16 @@ impl<'a> AdifParser<'a> {
     fn parse_record(&mut self) -> Result<Option<AdifRecord>, TransadifError> {
         let mut fields = Vec::new();
 
+        // Skip any leading whitespace before starting a new record
+        while self.pos < self.bytes.len() && self.bytes[self.pos].is_ascii_whitespace() {
+            self.pos += 1;
+        }
+
+        // If we've reached the end after skipping whitespace, no more records
+        if self.pos >= self.bytes.len() {
+            return Ok(None);
+        }
+
         // Parse fields until <eor>
         while self.pos < self.bytes.len() {
             if self.is_at_sequence(b"<eor>") {
@@ -394,8 +417,10 @@ impl<'a> AdifParser<'a> {
             // 2. The excess data after the field contains non-whitespace (suggesting truncation)
             // 3. We can successfully read the expected number of characters
             if char_count < expected_length {
+                // Check if there's non-whitespace in the excess data
+                // We need to be careful about '<' characters that might be part of the data vs actual field starts
                 let excess_non_whitespace = lookahead_str.chars()
-                    .take_while(|&c| c != '<')  // Stop at next field
+                    .take_while(|&c| c != '\n' && c != '\r')  // Stop at line breaks, which typically separate fields
                     .any(|c| !c.is_whitespace());
 
                 if excess_non_whitespace {
@@ -406,9 +431,6 @@ impl<'a> AdifParser<'a> {
                     while char_end < self.bytes.len() && chars_read < expected_length {
                         if let Some(ch) = std::str::from_utf8(&self.bytes[char_end..]).ok()
                             .and_then(|s| s.chars().next()) {
-                            if ch == '<' {  // Stop at next field
-                                break;
-                            }
                             char_end += ch.len_utf8();
                             chars_read += 1;
                         } else {
@@ -434,12 +456,16 @@ impl<'a> AdifParser<'a> {
     }
 
     fn is_field_start(&self) -> bool {
-        if self.pos >= self.bytes.len() || self.bytes[self.pos] != b'<' {
+        self.is_field_start_at(self.pos)
+    }
+
+    fn is_field_start_at(&self, pos: usize) -> bool {
+        if pos >= self.bytes.len() || self.bytes[pos] != b'<' {
             return false;
         }
 
         // Look for pattern <fieldname:length> or <fieldname:length:type>
-        let mut i = self.pos + 1;
+        let mut i = pos + 1;
 
         // Field name (alphanumeric + underscore, starting with letter)
         if i >= self.bytes.len() || !self.bytes[i].is_ascii_alphabetic() {

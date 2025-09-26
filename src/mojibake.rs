@@ -1,6 +1,42 @@
 use crate::errors::TransadifError;
 use std::str;
 
+/// Check if text appears to be meaningful (not just control characters or garbage)
+fn is_meaningful_text(text: &str) -> bool {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return false;
+    }
+
+    // Count meaningful characters (letters, digits, common punctuation, CJK characters)
+    let meaningful_count = chars.iter().filter(|&&c| {
+        c.is_alphabetic() ||
+        c.is_numeric() ||
+        c.is_whitespace() ||
+        matches!(c, '.' | ',' | '!' | '?' | ':' | ';' | '-' | '_' | '(' | ')' | '[' | ']' | '{' | '}' | '\'' | '"' | '@' | '#' | '$' | '%' | '&' | '*' | '+' | '=' | '/' | '\\' | '|' | '~' | '`' | '^') ||
+        (c as u32 >= 0x1100 && c as u32 <= 0x11FF) || // Hangul Jamo
+        (c as u32 >= 0x3130 && c as u32 <= 0x318F) || // Hangul Compatibility Jamo
+        (c as u32 >= 0xAC00 && c as u32 <= 0xD7AF) || // Hangul Syllables
+        (c as u32 >= 0x4E00 && c as u32 <= 0x9FFF) || // CJK Unified Ideographs
+        (c as u32 >= 0x3040 && c as u32 <= 0x309F) || // Hiragana
+        (c as u32 >= 0x30A0 && c as u32 <= 0x30FF) || // Katakana
+        (c as u32 >= 0x1F600 && c as u32 <= 0x1F64F)   // Emoticons
+    }).count();
+
+    // Text is meaningful if most characters are recognizable
+    // Also check that it doesn't contain too many unusual characters
+    let unusual_count = chars.iter().filter(|&&c| {
+        let code = c as u32;
+        // Cyrillic characters that might indicate over-correction
+        (code >= 0x0400 && code <= 0x04FF) ||
+        // Other suspicious ranges
+        (code >= 0x0100 && code <= 0x017F && !matches!(c, 'À'..='ÿ'))
+    }).count();
+
+    (meaningful_count as f64 / chars.len() as f64) > 0.8 &&
+    (unusual_count as f64 / chars.len() as f64) < 0.1
+}
+
 /// Detects and corrects mojibake in UTF-8 strings
 ///
 /// Looks for sequences of Unicode characters with code points between 192-223
@@ -21,6 +57,43 @@ pub fn fix_mojibake(text: &str) -> String {
 }
 
 fn fix_mojibake_once(text: &str) -> String {
+    // First try the general approach: convert the entire string back to bytes and see if it's valid UTF-8
+    let bytes: Vec<u8> = text.chars().map(|c| c as u8).collect();
+
+    // Check if the byte sequence is valid UTF-8 but different from the original
+    if let Ok(decoded) = std::str::from_utf8(&bytes) {
+        if decoded != text && is_meaningful_text(&decoded) {
+            // This looks like mojibake that can be fixed
+            return decoded.to_string();
+        }
+    }
+
+    // Try word-by-word approach for mixed content
+    let words: Vec<&str> = text.split(' ').collect();
+    if words.len() > 1 {
+        let mut fixed_words = Vec::new();
+        let mut any_changed = false;
+
+        for word in words {
+            let word_bytes: Vec<u8> = word.chars().map(|c| c as u8).collect();
+            if let Ok(decoded_word) = std::str::from_utf8(&word_bytes) {
+                if decoded_word != word && is_meaningful_text(&decoded_word) {
+                    fixed_words.push(decoded_word.to_string());
+                    any_changed = true;
+                } else {
+                    fixed_words.push(word.to_string());
+                }
+            } else {
+                fixed_words.push(word.to_string());
+            }
+        }
+
+        if any_changed {
+            return fixed_words.join(" ");
+        }
+    }
+
+    // If the general approach doesn't work, fall back to pattern-based detection
     let chars: Vec<char> = text.chars().collect();
     let mut result = String::new();
     let mut i = 0;
@@ -28,7 +101,9 @@ fn fix_mojibake_once(text: &str) -> String {
     while i < chars.len() {
         let ch = chars[i];
 
-        // Check if this could be the start of a mojibake sequence
+        // Check for various mojibake patterns
+
+        // Pattern 1: Standard UTF-8 mojibake (192-223 followed by 128-191)
         if (192..=223).contains(&(ch as u32)) {
             // Look ahead to find the complete sequence
             let mut sequence_chars = vec![ch];
@@ -56,6 +131,110 @@ fn fix_mojibake_once(text: &str) -> String {
                     }
                 }
             }
+        }
+
+        // Pattern 1b: Korean/CJK UTF-8 mojibake (including control characters)
+        if (ch as u32 >= 128) && (ch as u32 <= 255) {
+            // Look for sequences that could be UTF-8 bytes interpreted as ISO-8859-1
+            // Korean UTF-8 often creates sequences like: high-char, control-char, high-char
+            let mut sequence_chars = vec![ch];
+            let mut j = i + 1;
+
+            // Collect characters that could form a UTF-8 sequence
+            while j < chars.len() && sequence_chars.len() < 6 {
+                let next_char = chars[j];
+                let next_code = next_char as u32;
+
+                // Stop at spaces (but not other whitespace like \n, \t)
+                if next_char == ' ' {
+                    break;
+                }
+
+                // Include any character that could be a UTF-8 byte (0x80-0xFF)
+                if next_code >= 128 && next_code <= 255 {
+                    sequence_chars.push(next_char);
+                    j += 1;
+                } else if next_code < 32 {
+                    // Include control characters that might be UTF-8 continuation bytes
+                    sequence_chars.push(next_char);
+                    j += 1;
+                } else {
+                    break;
+                }
+            }
+
+            // Try to decode as UTF-8 if we have at least 2 characters
+            if sequence_chars.len() >= 2 {
+                let bytes: Vec<u8> = sequence_chars.iter().map(|&c| c as u8).collect();
+
+                // Try to interpret these bytes as UTF-8
+                if let Ok(decoded) = str::from_utf8(&bytes) {
+                    let original_string: String = sequence_chars.iter().collect();
+                    // Check if this produces meaningful text and is more compact
+                    if decoded != original_string &&
+                       decoded.chars().count() < original_string.chars().count() &&
+                       is_meaningful_text(&decoded) {
+                        result.push_str(decoded);
+                        i = j;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // Pattern 2: Nested mojibake with specific sequences
+        // Look for patterns like ÃƒÂ¡ (which represents doubly-encoded á)
+        if ch == 'Ã' && i + 3 < chars.len() {
+            let seq = [chars[i], chars[i+1], chars[i+2], chars[i+3]];
+
+            // Check for specific nested mojibake patterns
+            match seq {
+                ['Ã', 'ƒ', 'Â', '¡'] => { // á double-encoded
+                    result.push('á');
+                    i += 4;
+                    continue;
+                }
+                ['Ã', 'ƒ', 'Â', '±'] => { // ñ double-encoded
+                    result.push('ñ');
+                    i += 4;
+                    continue;
+                }
+                ['Ã', 'ƒ', 'Â', '©'] => { // é double-encoded
+                    result.push('é');
+                    i += 4;
+                    continue;
+                }
+                ['Ã', 'ƒ', 'Â', '³'] => { // ó double-encoded
+                    result.push('ó');
+                    i += 4;
+                    continue;
+                }
+                ['Ã', 'ƒ', 'Â', 'º'] => { // ú double-encoded
+                    result.push('ú');
+                    i += 4;
+                    continue;
+                }
+                ['Ã', 'ƒ', 'Â', '­'] => { // í double-encoded
+                    result.push('í');
+                    i += 4;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+
+        // Pattern 3: Check for Ã followed by ± (which might be ñ single-encoded)
+        if ch == 'Ã' && i + 1 < chars.len() && chars[i+1] == '±' {
+            result.push('ñ');
+            i += 2;
+            continue;
+        }
+
+        // Pattern 4: Check for Ã followed by ¡ (which might be á single-encoded)
+        if ch == 'Ã' && i + 1 < chars.len() && chars[i+1] == '¡' {
+            result.push('á');
+            i += 2;
+            continue;
         }
 
         // Not mojibake, keep the original character
