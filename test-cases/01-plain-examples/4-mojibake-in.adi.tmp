@@ -16,10 +16,3 @@ Output should be transcoded to Unicode and correct field counts in characters.
 <freq:5>7.200
 <mode:3>SSB
 <name:16>Juán Muñoz UTF
-<qth:12>El Ca�on ISO
-<address:30>Juán Muñoz en El Ca�on MIXED
-<qso_date:8>20250901
-<time_on:4>0400
-<notes:43>Mixed ISO and UTF-8, field counts in bytes
-<comment:43>Mixed ISO and UTF-8, field counts in bytes
-<eor>

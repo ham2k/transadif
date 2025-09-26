@@ -10,9 +10,3 @@ Expected output should be transcoded to Unicode.
 <call:5>K1ISO
 <freq:5>7.200
 <mode:3>SSB
-<name:21>Juán Mu&#x00F1;oz &#127881; &#x1F973; ISO
-<qso_date:8>20250903
-<time_on:4>0300
-<notes:26>ISO with extended entities
-<comment:26>ISO with extended entities
-<eor>

@@ -18,9 +18,3 @@ Output should be transcoded to Unicode and correct field counts in characters.
 <mode:3>SSB
 <name:20>JuÃ¡n MuÃ±oz UTF
 <qth:13>El Cañon ISO
-<address:32>JuÃ¡n Mu�oz en El Cañon MIXED
-<qso_date:8>20250901
-<time_on:4>0500
-<notes:60>Mixed ISO and UTF-8, nested mojibake, field counts in bytes
-<comment:60>Mixed ISO and UTF-8, nested mojibake,field counts in bytes
-<eor>
