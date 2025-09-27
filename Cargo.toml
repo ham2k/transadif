@@ -1,0 +1,28 @@
+[package]
+name = "transadif"
+version = "0.1.0"
+edition = "2021"
+authors = ["HAM2K"]
+description = "Command-line tool for processing ADIF files with proper encoding handling"
+license = "MIT"
+
+[lib]
+name = "transadif"
+path = "src/lib.rs"
+
+[[bin]]
+name = "transadif"
+path = "src/main.rs"
+
+[[bin]]
+name = "test-runner"
+path = "src/bin/test-runner.rs"
+
+[dependencies]
+clap = { version = "4.4", features = ["derive"] }
+htmlescape = "0.3"
+chardetng = "0.1"
+encoding_rs = "0.8"
+thiserror = "1.0"
+regex = "1.10"
+unicode-normalization = "0.1"
