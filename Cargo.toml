@@ -19,10 +19,22 @@ name = "test-runner"
 path = "src/bin/test-runner.rs"
 
 [dependencies]
-clap = { version = "4.4", features = ["derive"] }
+clap = { version = "4.4", features = ["derive", "std"], default-features = false }
 htmlescape = "0.3"
 chardetng = "0.1"
 encoding_rs = "0.8"
 thiserror = "1.0"
-regex = "1.10"
+regex = { version = "1.10", default-features = false, features = ["std"] }
 unicode-normalization = "0.1"
+
+[profile.release]
+# Optimize for size
+opt-level = "z"
+# Link Time Optimization
+lto = true
+# Reduce number of codegen units for better optimization
+codegen-units = 1
+# Strip symbols and debug info
+strip = true
+# Panic behavior
+panic = "abort"

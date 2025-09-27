@@ -15,8 +15,8 @@ cargo clean
 
 echo "Building optimized release binary for current platform..."
 
-# Build with full optimizations
-RUSTFLAGS="-C target-cpu=native -C strip=symbols" cargo build --release
+# Build with full optimizations (size optimization settings in Cargo.toml)
+cargo build --release
 
 # Determine current platform
 if [[ "$OSTYPE" == "darwin"* ]]; then
