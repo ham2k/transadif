@@ -94,7 +94,7 @@ Include any relevant entries in gitignore.
 
 When we talk about ISO-8859-1, we actually mean its superset, the Windows-1252 encoding. This is a common usage, and what most applications that use ISO-8859-1, like browsers, actually mean.
 
-To detect mojibake on a UTF-8 string, the tool should look for sequences of Unicode characters with code points between 192 and 223, followed by characters with code points between 128 and 191, and then verify if that sequence, when interpreted as bytes, corresponds to a valid UTF-8 sequences. If it does, the tool should replace that sequence by reinterpreting the bytes as UTF-8. This should be done recursively until no more sequences are found.
+To detect mojibake on a UTF-8 string, the tool should look for sequences of Unicode characters which correspond to the ISO-8859-1 equivalents to the two, three or four byte patterns of UTF-8. If it does, the tool should replace that sequence by reinterpreting the bytes as UTF-8. This should be done recursively until no more sequences are found.
 
 
 # Tooling
